@@ -1,15 +1,16 @@
-import torch
 import numpy as np
-from torch.autograd import Variable
-import torch.nn.functional as F
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Variable
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from models.base_model import BaseModel
 from modules.kg_reasoning.reasongnn import ReasonGNNLayer
-from modules.question_encoding.lstm_encoder import LSTMInstruction
-from modules.question_encoding.bert_encoder import BERTInstruction
 from modules.layer_init import TypeLayer
 from modules.query_update import AttnEncoder, Fusion, QueryReform
+from modules.question_encoding.bert_encoder import BERTInstruction
+from modules.question_encoding.lstm_encoder import LSTMInstruction
 
 VERY_SMALL_NUMBER = 1e-10
 VERY_NEG_NUMBER = -100000000000
@@ -26,7 +27,7 @@ class ReaRev(BaseModel):
         #self.share_module_def()
         self.norm_rel = args['norm_rel']
         self.layers(args)
-        
+
 
         self.loss_type =  args['loss_type']
         self.num_iter = args['num_iter']
@@ -35,7 +36,7 @@ class ReaRev(BaseModel):
         self.alg = args['alg']
         assert self.alg == 'bfs'
         self.lm = args['lm']
-        
+
         self.private_module_def(args, num_entity, num_relation)
 
         self.to(self.device)
@@ -45,6 +46,26 @@ class ReaRev(BaseModel):
         self.reforms = []
         for i in range(self.num_ins):
             self.add_module('reform' + str(i), QueryReform(self.entity_dim))
+
+        # --- D-RAGのための追加 ---
+        # 1. LLM-Generator (Hugging Faceからロード)
+        # (実際にはargsからLLMのモデル名を受け取るようにするのが望ましい)
+        llm_name = "meta-llama/Llama-2-7b-chat-hf" # 例
+        self.llm_generator = AutoModelForCausalLM.from_pretrained(llm_name)
+        self.llm_tokenizer = AutoTokenizer.from_pretrained(llm_name)
+        if self.llm_tokenizer.pad_token is None:
+            self.llm_tokenizer.pad_token = self.llm_tokenizer.eos_token
+
+        # 2. Differentiable Prompting 用のプロジェクター
+        gnn_dim = args['entity_dim']
+        llm_dim = self.llm_generator.config.hidden_size
+        self.projector = nn.Linear(gnn_dim, llm_dim)
+
+        # 3. Gumbel-Softmax と損失のハイパーパラメータ
+        self.temperature = args.get('gumbel_temp', 0.5)
+        # 論文の二段階学習 [cite: 462-466] のため、損失の重みを設定
+        self.lambda_l1 = args.get('lambda_l1', 0.9) # リトリーバー損失(L1)の重み
+        self.lambda_l2 = 1.0 - self.lambda_l1       # ジェネレータ損失(L2)の重み
         # self.reform_rel = QueryReform(self.entity_dim)
         # self.add_module('reform', QueryReform(self.entity_dim))
 
@@ -56,7 +77,7 @@ class ReaRev(BaseModel):
 
         #self.lstm_dropout = args['lstm_dropout']
         self.linear_dropout = args['linear_dropout']
-        
+
         self.entity_linear = nn.Linear(in_features=self.ent_dim, out_features=entity_dim)
         self.relation_linear = nn.Linear(in_features=self.rel_dim, out_features=entity_dim)
         # self.relation_linear_inv = nn.Linear(in_features=self.rel_dim, out_features=entity_dim)
@@ -84,10 +105,10 @@ class ReaRev(BaseModel):
         else:
             local_entity_emb = self.entity_embedding(local_entity)  # batch_size, max_local_entity, word_dim
             local_entity_emb = self.entity_linear(local_entity_emb)
-        
+
         return local_entity_emb
-    
-   
+
+
     def get_rel_feature(self):
         """
         Encode relation tokens to vectors.
@@ -98,10 +119,10 @@ class ReaRev(BaseModel):
             rel_features = self.relation_linear(rel_features)
             rel_features_inv = self.relation_linear(rel_features_inv)
         else:
-            
+
             rel_features = self.instruction.question_emb(self.rel_features)
             rel_features_inv = self.instruction.question_emb(self.rel_features_inv)
-            
+
             rel_features = self.self_att_r(rel_features,  (self.rel_texts != self.instruction.pad_val).float())
             rel_features_inv = self.self_att_r(rel_features_inv,  (self.rel_texts != self.instruction.pad_val).float())
             if self.lm == 'lstm':
@@ -143,8 +164,8 @@ class ReaRev(BaseModel):
         self.dist_history = []
         self.action_probs = []
         self.seed_entities = curr_dist
-        
-        self.reasoning.init_reason( 
+
+        self.reasoning.init_reason(
                                    local_entity=local_entity,
                                    kb_adj_mat=kb_adj_mat,
                                    local_entity_emb=self.local_entity_emb,
@@ -159,7 +180,7 @@ class ReaRev(BaseModel):
         cur_loss = torch.sum(tp_loss) / curr_dist.size(0)
         return cur_loss
 
-    
+
     def forward(self, batch, training=False):
         """
         Forward function: creates instructions and performs GNN reasoning.
@@ -179,11 +200,11 @@ class ReaRev(BaseModel):
         if self.lm != 'lstm':
             pad_val = self.instruction.pad_val #tokenizer.convert_tokens_to_ids(self.instruction.tokenizer.pad_token)
             query_mask = (q_input != pad_val).float()
-            
+
         else:
             query_mask = (q_input != self.num_word).float()
 
-        
+
         """
         Instruction generations
         """
@@ -191,7 +212,7 @@ class ReaRev(BaseModel):
                          kb_adj_mat=kb_adj_mat, q_input=q_input, query_entities=query_entities)
         self.instruction.init_reason(q_input)
         for i in range(self.num_ins):
-            relational_ins, attn_weight = self.instruction.get_instruction(self.instruction.relational_ins, step=i) 
+            relational_ins, attn_weight = self.instruction.get_instruction(self.instruction.relational_ins, step=i)
             self.instruction.instructions.append(relational_ins.unsqueeze(1))
             self.instruction.relational_ins = relational_ins
         #relation_ins = torch.cat(self.instruction.instructions, dim=1)
@@ -205,9 +226,11 @@ class ReaRev(BaseModel):
 
         for t in range(self.num_iter):
             relation_ins = torch.cat(self.instruction.instructions, dim=1)
-            self.curr_dist = current_dist            
+            self.curr_dist = current_dist
             for j in range(self.num_gnn):
                 self.curr_dist, global_rep = self.reasoning(self.curr_dist, relation_ins, step=j)
+                final_entity_reps = global_rep
+                final_entity_probs = self.curr_dist
             self.dist_history.append(self.curr_dist)
             qs = []
 
@@ -219,8 +242,8 @@ class ReaRev(BaseModel):
                 q = reform(self.instruction.instructions[j].squeeze(1), global_rep, query_entities, local_entity)
                 qs.append(q.unsqueeze(1))
                 self.instruction.instructions[j] = q.unsqueeze(1)
-        
-        
+
+
         """
         Answer Predictions
         """
@@ -232,7 +255,7 @@ class ReaRev(BaseModel):
         # for pred_dist in self.dist_history:
         loss = self.calc_loss_label(curr_dist=pred_dist, teacher_dist=answer_dist, label_valid=case_valid)
 
-        
+
         pred_dist = self.dist_history[-1]
         pred = torch.max(pred_dist, dim=1)[1]
         if training:
@@ -242,4 +265,3 @@ class ReaRev(BaseModel):
             tp_list = None
         return loss, pred, pred_dist, tp_list
 
-    

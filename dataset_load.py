@@ -1,22 +1,26 @@
 import json
-import numpy as np
-import re
-from tqdm import tqdm
-import torch
-from collections import Counter
-import random
-import warnings
 import pickle
+import random
+import re
+import warnings
+from collections import Counter
+
+import numpy as np
+import torch
+from tqdm import tqdm
+
 warnings.filterwarnings("ignore")
-from modules.question_encoding.tokenizers import LSTMTokenizer#, BERTTokenizer
-from transformers import AutoTokenizer
+import os
 import time
 
-import os
+from transformers import AutoTokenizer
+
+from modules.question_encoding.tokenizers import \
+    LSTMTokenizer  # , BERTTokenizer
 
 
 class BasicDataLoader(object):
-    """ 
+    """
     Basic Dataloader contains all the functions to read questions and KGs from json files and
     create mappings between global entity ids and local ids that are used during GNN updates.
     """
@@ -24,16 +28,25 @@ class BasicDataLoader(object):
     def __init__(self, config, word2id, relation2id, entity2id, tokenize, data_type="train"):
         self.tokenize = tokenize
         self._parse_args(config, word2id, relation2id, entity2id)
+
+        # --- D-RAGのための追加 ---
+        llm_name = "meta-llama/Llama-2-7b-chat-hf" # 例 (argsから渡すのが望ましい)
+        self.llm_tokenizer = AutoTokenizer.from_pretrained(llm_name)
+        if self.llm_tokenizer.pad_token is None:
+            self.llm_tokenizer.pad_token = self.llm_tokenizer.eos_token
+        self.max_entity_text_len = 32 # 例 (エンティティ名の最大トークン長)
+        self.max_answer_text_len = 64 # 例 (回答文の最大トークン長)
+        # ------------------------
         self._load_file(config, data_type)
         self._load_data()
-        
+
 
     def _load_file(self, config, data_type="train"):
 
         """
         Loads lines (questions + KG subgraphs) from json files.
         """
-        
+
         data_file = config['data_folder'] + data_type + ".json"
         self.data_file = data_file
         print('loading data from', data_file)
@@ -46,7 +59,7 @@ class BasicDataLoader(object):
             for line in tqdm(f_in):
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
                 line = json.loads(line)
-                
+
                 if len(line['entities']) == 0:
                     skip_index.add(index)
                     continue
@@ -126,10 +139,10 @@ class BasicDataLoader(object):
                                                                             len(self.relation2id),
                                                                             self.num_kb_relation))
 
-    
+
     def get_quest(self, training=False):
         q_list = []
-        
+
         sample_ids = self.sample_ids
         for sample_id in sample_ids:
             tp_str = self.decode_text(self.query_texts[sample_id, :])
@@ -154,7 +167,7 @@ class BasicDataLoader(object):
                 if w not in ['[CLS]', '[SEP]', '[PAD]']:
                     tp_str += w + " "
         return tp_str
-    
+
 
     def _prepare_data(self):
         """
@@ -166,7 +179,7 @@ class BasicDataLoader(object):
             word_list = line["question"].split(' ')
             max_count = max(max_count, len(word_list))
 
-        
+
         if self.rel_word_emb:
             self.build_rel_words(self.tokenize)
         else:
@@ -187,7 +200,7 @@ class BasicDataLoader(object):
             self.query_texts = np.full((self.num_data, self.max_query_word), self.num_word, dtype=int)
         else:
             if self.tokenize == 'bert':
-                tokenizer_name = 'bert-base-uncased'    
+                tokenizer_name = 'bert-base-uncased'
             elif self.tokenize  == 'roberta':
                 tokenizer_name = 'roberta-base'
             elif self.tokenize  == 'sbert':
@@ -207,7 +220,7 @@ class BasicDataLoader(object):
             #self.tokenizer = AutoTokenizer(self.max_query_word)
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
             self.num_word = self.tokenizer.convert_tokens_to_ids(self.tokenizer.pad_token) #self.tokenizer.q_tokenizer.encode("[UNK]")[0]
-            
+
             self.query_texts = np.full((self.num_data, self.max_query_word), self.num_word, dtype=int)
 
 
@@ -243,7 +256,7 @@ class BasicDataLoader(object):
                 self.query_entities[next_id, local_ent] = 1.0
                 seed_list.append(local_ent)
                 tp_set.add(local_ent)
-            
+
             self.seed_list[next_id] = seed_list
             num_query_entity[next_id] = len(tp_set)
             for global_entity, local_entity in g2l.items():
@@ -289,7 +302,7 @@ class BasicDataLoader(object):
                     rel_list.append(rel + len(self.relation2id))
                     tail_list.append(head)
                     self.kb_fact_rels[next_id, i] = rel + len(self.relation2id)
-                
+
             if len(tp_set) > 0:
                 for local_ent in tp_set:
                     self.seed_distribution[next_id, local_ent] = 1.0 / len(tp_set)
@@ -350,9 +363,9 @@ class BasicDataLoader(object):
               " {} cases with multiple query entities".format(next_id, num_no_query_ent,
                                                               num_one_query_ent, num_multiple_ent))
 
-        
+
     def build_rel_words(self, tokenize):
-        """ 
+        """
         Tokenizes relation surface forms.
         """
 
@@ -378,7 +391,7 @@ class BasicDataLoader(object):
                     rel_words.append(words)
                     pass
                 #words = fields[-2].split('_') + fields[-1].split('_')
-            
+
         self.max_rel_words = max_rel_words
         if tokenize == 'lstm':
             self.rel_texts = np.full((self.num_kb_relation + 1, self.max_rel_words), len(self.word2id), dtype=int)
@@ -407,12 +420,12 @@ class BasicDataLoader(object):
                 tokenizer_name = 't5-small'
             elif tokenize  == 'relbert':
                 tokenizer_name = 'pretrained_lms/sr-simbert/'
-            
+
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
             pad_val = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
             self.rel_texts = np.full((self.num_kb_relation + 1, self.max_rel_words), pad_val, dtype=int)
             self.rel_texts_inv = np.full((self.num_kb_relation + 1, self.max_rel_words), pad_val, dtype=int)
-            
+
             for rel_id,words in enumerate(rel_words):
 
                 tokens =  tokenizer.encode_plus(text=' '.join(words), max_length=self.max_rel_words, \
@@ -423,7 +436,7 @@ class BasicDataLoader(object):
                 self.rel_texts_inv[rel_id] = np.array(tokens_inv['input_ids'])
 
 
-        
+
         #print(rel_words)
         #print(len(rel_words), len(self.relation2id))
         assert len(rel_words) == len(self.relation2id)
@@ -436,7 +449,7 @@ class BasicDataLoader(object):
         """
         sample = self.data[sample_id]
         g2l = self.global2local_entity_maps[sample_id]
-        
+
         # build connection between question and entities in it
         head_list = []
         rel_list = []
@@ -469,7 +482,7 @@ class BasicDataLoader(object):
 
         return np.array(head_list, dtype=int),  np.array(rel_list, dtype=int), np.array(tail_list, dtype=int)
 
-    
+
     def _build_fact_mat(self, sample_ids, fact_dropout):
         """
         Creates local adj mats that contain entities, relations, and structure.
@@ -510,7 +523,7 @@ class BasicDataLoader(object):
         # tail_count = Counter(batch_tails)
         weight_list = [1.0 / head_count[head] for head in batch_heads]
 
-        
+
         head_rels_batch = list(zip(batch_heads, batch_rels))
         #print(head_rels_batch)
         head_rels_count = Counter(head_rels_batch)
@@ -582,10 +595,10 @@ class BasicDataLoader(object):
             q_input = self.query_texts[sample_ids]
         else:
             raise NotImplementedError
-        
+
         return q_input
 
-    
+
 
 
 
@@ -595,7 +608,7 @@ class SingleDataLoader(BasicDataLoader):
     """
     def __init__(self, config, word2id, relation2id, entity2id, tokenize, data_type="train"):
         super(SingleDataLoader, self).__init__(config, word2id, relation2id, entity2id, tokenize, data_type)
-        
+
     def get_batch(self, iteration, batch_size, fact_dropout, q_type=None, test=False):
         start = batch_size * iteration
         end = min(batch_size * (iteration + 1), self.num_data)
@@ -609,7 +622,7 @@ class SingleDataLoader(BasicDataLoader):
         seed_dist = self.seed_distribution[sample_ids]
         q_input = self.deal_q_type(q_type)
         kb_adj_mats = self._build_fact_mat(sample_ids, fact_dropout=fact_dropout)
-        
+
         if test:
             return self.candidate_entities[sample_ids], \
                    self.query_entities[sample_ids], \
@@ -656,7 +669,7 @@ def load_data(config, tokenize):
         entity2id = load_dict(config['data_folder'] + config['entity2id'])
     word2id = load_dict(config['data_folder'] + config['word2id'])
     relation2id = load_dict(config['data_folder'] + config['relation2id'])
-    
+
     if config["is_eval"]:
         train_data = None
         valid_data = SingleDataLoader(config, word2id, relation2id, entity2id, tokenize, data_type="dev")
