@@ -96,6 +96,12 @@ def create_parser_rearev(parser):
     parser.add_argument('--norm_rel', action='store_true')
     parser.add_argument('--data_eff', action='store_true')
     parser.add_argument('--pos_emb', action='store_true')
+    # === 2段階推論のための引数を追加 ===
+    parser.add_argument('--refinement_threshold', default=0.01, type=float, 
+                        help='Threshold for candidate selection in Pass 1.')
+    parser.add_argument('--run_refinement_pass', default=True, type=bool_flag,
+                        help='Whether to run the Pass 2 (refinement).')
+    # ==================================
     add_shared_args(parser)
 
 
