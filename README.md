@@ -21,93 +21,72 @@ python main.py ReaRev --entity_dim 50 --num_epoch 200 --batch_size 8 --eval_ever
 
 The result is saved as a `.info` file. In order to use GNN-RAG, please move this file to the corresponding folder in `GNN-RAG/llm/results/gnn/` by renaming it to `test.info`.
 
-
 ```mermaid
-flowchart TD
+graph TD
 
-    subgraph ReaRev[ReaRev Model]
+    %% スタイル定義
+    classDef loss fill:#f9d5e5,stroke:#333,stroke-width:2px;
+    classDef embed fill:#e1f7d5,stroke:#333,stroke-width:2px;
+    classDef core fill:#d5e8f7,stroke:#333,stroke-width:2px;
+    classDef submod fill:#fff,stroke:#999,stroke-dasharray: 5 5;
+
+    subgraph ReaRev["ReaRev Model (Total Params: ~113M)"]
         direction TB
 
-        %% Embeddings
-        subgraph EMB[Embeddings]
-            WORD_EMB[Word Embedding\n(1 → 768)]
-            REL_EMB[Relation Embedding\n6651 → 150]
-            REL_EMB_INV[Relation Embedding Inv\n6651 → 150]
+        %% Loss Functions
+        subgraph Losses["Loss Functions"]
+            L1["KLDivLoss"]:::loss
+            L2["BCEWithLogitsLoss"]:::loss
+            L3["MSELoss"]:::loss
         end
 
-        %% Linear Layers
-        subgraph LINEAR[Linear Transforms]
-            ENT_LIN[entity_linear\n100 → 150]
-            REL_LIN[relation_linear\n150 → 150]
-            LIN_DROP[Dropout 0.2]
-        end
-
-        %% Type Layer
-        subgraph TYPE[TypeLayer]
-            TYPE_DROP[Dropout 0.2]
-            TYPE_KB[kb_self_linear\n150 → 150]
-        end
-
-        %% Self Attention
-        subgraph SELFATT[SelfAtt (AttnEncoder)]
-            KEY[key_linear\n150 → 150]
-            VAL[value_linear\n150 → 150]
-        end
-
-        %% Reasoning GNN
-        subgraph GNN[ReasonGNNLayer]
-            SOFTMAX[Softmax dim=1]
-            SCORE[score_func\n150 → 1]
-            GLOB[glob_lin\n150 → 150]
-            LIN_GNN[lin\n300 → 150]
-            REL0[rel_linear0\n150 → 150]
-            E2E0[e2e_linear0\n1050 → 150]
-            REL1[rel_linear1\n150 → 150]
-            E2E1[e2e_linear1\n1050 → 150]
-            REL2[rel_linear2\n150 → 150]
-            E2E2[e2e_linear2\n1050 → 150]
-            LIN_M[lin_m\n450 → 150]
+        %% Embeddings & Projection
+        subgraph Inputs["Embeddings & Initial Projection"]
+            WE["Word Embedding<br/>(1, 768)"]:::embed
+            RE["Relation Embedding<br/>(6651, 150)"]:::embed
+            REI["Relation Embedding Inv<br/>(6651, 150)"]:::embed
+            EL["Entity Linear<br/>100 → 150"]:::embed
+            RL["Relation Linear<br/>150 → 150"]:::embed
         end
 
         %% Instruction Module
-        subgraph INST[BERTInstruction]
-            INST_DROP[Dropout]
-            WORD_EMB_I[word_embedding 1→768]
-            CQ[cq_linear 600→150]
-            CA[ca_linear 150→1]
-            QL0[question_linear0 150→150]
-            QL1[question_linear1 150→150]
-            QL2[question_linear2 150→150]
-            Q_EMB[question_emb 768→150]
+        subgraph Instruction["Instruction Module (BERTInstruction)"]
+            direction TB
+            BERT["BERT Model<br/>12 Layers / Hidden 768"]:::core
+            QP["Question Projections<br/>Linear Layers 0-2"]:::submod
+            BERT --> QP
+        end
 
-            subgraph BERT[BERT Encoder]
-                BERT_EMB[BertEmbeddings]
-                BERT_ENC[BertEncoder (12 layers)]
-                BERT_POOL[BertPooler]
+        %% Reasoning Module
+        subgraph Reasoning["Reasoning Module (ReasonGNNLayer)"]
+            direction TB
+
+            GNN["GNN Core Logic"]:::core
+
+            subgraph Steps["Multi-Step Reasoning"]
+                S0["Step 0: Rel/E2E Linear"]:::submod
+                S1["Step 1: Rel/E2E Linear"]:::submod
+                S2["Step 2: Rel/E2E Linear"]:::submod
             end
+
+            GNN --- S0
+            GNN --- S1
+            GNN --- S2
         end
 
-        %% Fusion
-        subgraph FUS[Fusion]
-            FUS_R[r linear\n450→150]
-            FUS_G[g linear\n450→150]
+        %% Query Reformulation
+        subgraph Reform["Query Reformulation"]
+            RF0["QueryReform 0"]:::core
+            RF1["QueryReform 1"]:::core
+            RF2["QueryReform 2"]:::core
+            Fusion["Fusion Module"]:::submod
         end
 
-        %% Reform Layers
-        subgraph REFORM[QueryReform ×3]
-            REFORM0[Reform0]
-            REFORM1[Reform1]
-            REFORM2[Reform2]
-        end
+        %% Connections
+        Inputs --> Reasoning
+        Instruction --> Reasoning
+        Reasoning --> Reform
+        Reform --> L2
     end
-
-    %% Connections
-    WORD_EMB --> ENT_LIN
-    REL_EMB --> REL_LIN
-    ENT_LIN --> TYPE
-    REL_LIN --> SELFATT
-    SELFATT --> GNN
-    GNN --> FUS
-    INST --> FUS
-    FUS --> REFORM
 ```
+
