@@ -22,7 +22,7 @@ python main.py ReaRev --entity_dim 50 --num_epoch 200 --batch_size 8 --eval_ever
 The result is saved as a `.info` file. In order to use GNN-RAG, please move this file to the corresponding folder in `GNN-RAG/llm/results/gnn/` by renaming it to `test.info`.
 
 
-
+```mermaid
 flowchart TD
 
     subgraph ReaRev[ReaRev Model]
@@ -110,3 +110,4 @@ flowchart TD
     GNN --> FUS
     INST --> FUS
     FUS --> REFORM
+```
