@@ -47,7 +47,7 @@ class ReaRev(BaseModel):
             self.add_module('reform' + str(i), QueryReform(self.entity_dim))
         # === 2段階推論のための設定 (ユーザー要求) ===
         # Pass 1 で使用する低い閾値
-        self.refinement_threshold = args.get('refinement_threshold', 0.01) 
+        self.refinement_threshold = args.get('refinement_threshold', 0.4) 
         # Pass 2 の絞り込み推論を実行するかどうかのフラグ
         self.run_refinement_pass = args.get('run_refinement_pass', True)
         # self.reform_rel = QueryReform(self.entity_dim)
@@ -172,8 +172,12 @@ class ReaRev(BaseModel):
         """
 
         # local_entity, query_entities, kb_adj_mat, query_text, seed_dist, answer_dist = batch
-        local_entity, query_entities, kb_adj_mat, query_text, seed_dist, true_batch_id, answer_dist = batch
+        # local_entity, query_entities, kb_adj_mat, query_text, seed_dist, true_batch_id, answer_dist = batch
+        # local_entity = torch.from_numpy(local_entity).type('torch.LongTensor').to(self.device)
+        local_entity, query_entities, kb_adj_mat, query_text, seed_dist, true_batch_id, answer_dist = batch[:7]
+        
         local_entity = torch.from_numpy(local_entity).type('torch.LongTensor').to(self.device)
+        # ... (以降は変更なし)
         # local_entity_mask = (local_entity != self.num_entity).float()
         query_entities = torch.from_numpy(query_entities).type('torch.FloatTensor').to(self.device)
         answer_dist = torch.from_numpy(answer_dist).type('torch.FloatTensor').to(self.device)
@@ -247,7 +251,7 @@ class ReaRev(BaseModel):
             
             # 閾値で候補が0件の場合のフォールバック (例: Top-k)
             if torch.sum(candidate_mask) == 0:
-                # print("Warning: No candidates found with threshold. Falling back to top-5.")
+                print("Warning: No candidates found with threshold. Falling back to top-5.")
                 _, top_k_indices = torch.topk(pass1_dist, k=5, dim=1)
                 candidate_mask = torch.zeros_like(pass1_dist).scatter_(1, top_k_indices, 1.0)
         
@@ -259,6 +263,17 @@ class ReaRev(BaseModel):
         
         # 勾配が流れるように Variable に変換
         refinement_start_dist = Variable(refinement_start_dist, requires_grad=True)
+        
+        # === グラフ可視化のためのデバッグ情報保存 ===
+        if not training:
+            self.debug_info = {
+                "refinement_start_dist": refinement_start_dist.detach().cpu().numpy(),
+                "pass1_dist": pass1_dist.detach().cpu().numpy(),
+                "local_entity": local_entity.cpu().numpy(),
+                "kb_adj_mat": kb_adj_mat, # (batch_heads, batch_rels, batch_tails, ...)
+                "query_entities": query_entities.cpu().numpy()
+            }
+        # ==========================================
 
         
         """
@@ -327,7 +342,12 @@ class ReaRev(BaseModel):
         if training:
             h1, f1 = self.get_eval_metric(pred_dist, answer_dist)
             tp_list = [h1.tolist(), f1.tolist()]
+            return loss, pred, pred_dist, tp_list
         else:
             tp_list = None
-        return loss, pred, pred_dist, tp_list
+            # 評価時はデバッグ情報を追加して返す
+            if hasattr(self, 'debug_info'):
+                return loss, pred, pred_dist, tp_list, self.debug_info
+            else:
+                return loss, pred, pred_dist, tp_list
     
