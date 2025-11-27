@@ -23,8 +23,11 @@ class BasicDataLoader(object):
 
     def __init__(self, config, word2id, relation2id, entity2id, tokenize, data_type="train"):
         self.tokenize = tokenize
+        # entityやrelationのサイズや辞書の作成
         self._parse_args(config, word2id, relation2id, entity2id)
+        # jsonファイルを読み込んでいく。
         self._load_file(config, data_type)
+        #
         self._load_data()
         
 
@@ -33,7 +36,7 @@ class BasicDataLoader(object):
         """
         Loads lines (questions + KG subgraphs) from json files.
         """
-        
+        # jsonからquestionとKGのsubgraphを取得する。
         data_file = config['data_folder'] + data_type + ".json"
         self.data_file = data_file
         print('loading data from', data_file)
@@ -45,11 +48,13 @@ class BasicDataLoader(object):
         with open(data_file) as f_in:
             for line in tqdm(f_in):
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
-                line = json.loads(line)
+                line = json.loads(line) #jsonで1行づつ取得する。
                 
+                # entitiesが0だったら、skipする。多分topic entityのこと。
                 if len(line['entities']) == 0:
                     skip_index.add(index)
                     continue
+                # dataに１行づつappendしていく
                 self.data.append(line)
                 self.max_facts = max(self.max_facts, 2 * len(line['subgraph']['tuples']))
                 index += 1
@@ -60,12 +65,13 @@ class BasicDataLoader(object):
         self.batches = np.arange(self.num_data)
 
     def _load_data(self):
-
+        # globalで用いるentityのidとローカルで用いるentitiyのidの対応表を作成する。
         """
         Creates mappings between global entity ids and local entity ids that are used during GNN updates.
         """
 
         print('converting global to local entity index ...')
+        # localなentityをmappingして、averageをprintで出力
         self.global2local_entity_maps = self._build_global2local_entity_maps()
 
         if self.use_self_loop:
@@ -83,6 +89,7 @@ class BasicDataLoader(object):
         self.answer_dists = np.zeros((self.num_data, self.max_local_entity), dtype=float)
         self.answer_lists = np.empty(self.num_data, dtype=object)
 
+        #head,relation,objなどもろもろの処理
         self._prepare_data()
 
     def _parse_args(self, config, word2id, relation2id, entity2id):
@@ -90,6 +97,7 @@ class BasicDataLoader(object):
         """
         Builds necessary dictionaries and stores arguments.
         """
+
         self.data_eff = config['data_eff']
         self.data_name = config['name']
 
@@ -110,10 +118,10 @@ class BasicDataLoader(object):
 
         print('building word index ...')
         self.word2id = word2id
-        self.id2word = {i: word for word, i in word2id.items()}
-        self.relation2id = relation2id
-        self.entity2id = entity2id
-        self.id2entity = {i: entity for entity, i in entity2id.items()}
+        self.id2word = {i: word for word, i in word2id.items()} #word2idを`'apple':0,'banana':1,のように、数字とwordを合わせている
+        self.relation2id = relation2id #relationはそのまま
+        self.entity2id = entity2id #entitiをそのまま
+        self.id2entity = {i: entity for entity, i in entity2id.items()} #entityはも数字とentityで表している
         self.q_type = config['q_type']
 
         if self.use_inverse_relation:
@@ -125,6 +133,7 @@ class BasicDataLoader(object):
         print("Entity: {}, Relation in KB: {}, Relation in use: {} ".format(len(entity2id),
                                                                             len(self.relation2id),
                                                                             self.num_kb_relation))
+        #entityとrelationのサイズが表示される。
 
     
     def get_quest(self, training=False):
@@ -157,6 +166,7 @@ class BasicDataLoader(object):
     
 
     def _prepare_data(self):
+        # globalなlocal entityと隣接行列を取得する。
         """
         global2local_entity_maps: a map from global entity id to local entity id
         adj_mats: a local adjacency matrix for each relation. relation 0 is reserved for self-connection.
@@ -213,18 +223,20 @@ class BasicDataLoader(object):
 
         next_id = 0
         num_query_entity = {}
+        # jsonの1lineづつ読み込む
         for sample in tqdm(self.data):
+            # question idにsampleのidをappendしていく
             self.question_id.append(sample["id"])
-            # get a list of local entities
+            # localなenityの辞書を取得するする。
             g2l = self.global2local_entity_maps[next_id]
-            #print(g2l)
+            
             if len(g2l) == 0:
-                #print(next_id)
                 continue
             # build connection between question and entities in it
             tp_set = set()
             seed_list = []
             key_ent = 'entities_cid' if 'entities_cid' in sample else 'entities'
+            #毎 topic entiesごとに行う
             for j, entity in enumerate(sample[key_ent]):
                 # if entity['text'] not in self.entity2id:
                 #     continue
@@ -233,15 +245,16 @@ class BasicDataLoader(object):
                         global_entity = self.entity2id[entity['text']]
                     else:
                         global_entity = self.entity2id[entity]
+                    #それをglobalentityとする
                     global_entity = self.entity2id[entity['text']]
                 except:
                     global_entity = entity #self.entity2id[entity['text']]
 
                 if global_entity not in g2l:
                     continue
-                local_ent = g2l[global_entity]
-                self.query_entities[next_id, local_ent] = 1.0
-                seed_list.append(local_ent)
+                local_ent = g2l[global_entity] #globalなenity idをlocalなentityidに変換。例）g2l = {100;1,200:2,333:2,...}という風にglobalなentityidとlocalなentity_idを対応づける
+                self.query_entities[next_id, local_ent] = 1.0 #localなentityをone hotベクトルとする
+                seed_list.append(local_ent) #GNNの出発点
                 tp_set.add(local_ent)
             
             self.seed_list[next_id] = seed_list
@@ -254,7 +267,7 @@ class BasicDataLoader(object):
                     #print(local_entity)
                         self.candidate_entities[next_id, local_entity] = global_entity
                 elif self.data_name == 'cwq':
-                    self.candidate_entities[next_id, local_entity] = global_entity
+                    self.candidate_entities[next_id, local_entity] = global_entity #self.candidate_etitiesもline数,localなentityの集合になる
                 # if local_entity != 0:  # skip question node
                 #     self.candidate_entities[next_id, local_entity] = global_entity
 
@@ -263,10 +276,10 @@ class BasicDataLoader(object):
             rel_list = []
             tail_list = []
             for i, tpl in enumerate(sample['subgraph']['tuples']):
-                sbj, rel, obj = tpl
+                sbj, rel, obj = tpl #subgraphのtupleを1つづつ取り出し、主語関係目的語というようにする。
                 try:
                     if isinstance(sbj, dict) and  'text' in sbj:
-                        head = g2l[self.entity2id[sbj['text']]]
+                        head = g2l[self.entity2id[sbj['text']]] #entities.txtには主語のentites.txtの値をg2lにmappingしたものがhead,relaation,tailとなる。
                         rel = self.relation2id[rel['text']]
                         tail = g2l[self.entity2id[obj['text']]]
                     else:
@@ -280,7 +293,7 @@ class BasicDataLoader(object):
                     except:
                         rel = self.relation2id[rel]
                     tail = g2l[obj]
-                head_list.append(head)
+                head_list.append(head) #headlistを作成する
                 rel_list.append(rel)
                 tail_list.append(tail)
                 self.kb_fact_rels[next_id, i] = rel
@@ -324,7 +337,7 @@ class BasicDataLoader(object):
                 for answer in sample['answers']:
                     keyword = 'text' if type(answer['kb_id']) == int else 'kb_id'
                     answer_ent = self.entity2id[answer[keyword]]
-                    answer_list.append(answer_ent)
+                    answer_list.append(answer_ent)#answerlistを作成しておく。
                     if answer_ent in g2l:
                         self.answer_dists[next_id, g2l[answer_ent]] = 1.0
             self.answer_lists[next_id] = answer_list
@@ -534,24 +547,34 @@ class BasicDataLoader(object):
             self.batches = np.random.permutation(self.num_data)
 
     def _build_global2local_entity_maps(self):
+        # global entity　idからlocal な entityをそれぞれ作成する。
         """Create a map from global entity id to local entity of each sample"""
+        # global2lcoal_entity_mapsをself.num_data(jsonの行数)だけ初期化する
         global2local_entity_maps = [None] * self.num_data
+        # total_local_entityを0にする
         total_local_entity = 0.0
         next_id = 0
+        # jsonのline数だけ1sampleづつ取得する
         for sample in tqdm(self.data):
+            #空の辞書ディレクトリを作成する
             g2l = dict()
             if 'entities_cid' in sample:
                 self._add_entity_to_map(self.entity2id, sample['entities_cid'], g2l)
             else:
+                #基本的には下になる。entites.txtとjsonのentitiesに値があるかどうかあれば、それをg2lに格納する
                 self._add_entity_to_map(self.entity2id, sample['entities'], g2l)
-            #self._add_entity_to_map(self.entity2id, sample['entities'], g2l)
-            # construct a map from global entity id to local entity id
+            
+            # subgraphについても同様の処理を行う。subgraphのentitiesをもらい。g2lにmappingする
             self._add_entity_to_map(self.entity2id, sample['subgraph']['entities'], g2l)
 
+            # global_local_entity_mapsにjsonのlineごとにg2lを格納する。
             global2local_entity_maps[next_id] = g2l
+            # totalのlocalなentityがg2lの個数とわかる。
             total_local_entity += len(g2l)
+            # maxなlocalなentityの個数は毎回のjsonlineごとに更新されるかかも？
             self.max_local_entity = max(self.max_local_entity, len(g2l))
             next_id += 1
+        # 1subgraphあたりのどのくらいかがわかる    
         print('avg local entity: ', total_local_entity / next_id)
         print('max local entity: ', self.max_local_entity)
         return global2local_entity_maps
@@ -560,16 +583,19 @@ class BasicDataLoader(object):
 
     @staticmethod
     def _add_entity_to_map(entity2id, entities, g2l):
-        #print(entities)
-        #print(entity2id)
+        #入力：entity2id: entities.txt,entities:jsonのtopicentiy,g2l:mappingするための空の辞書
+
+        # topic entityが２つある場合もあるのでfor文でループ
         for entity_global_id in entities:
             try:
+
                 if isinstance(entity_global_id, dict) and 'text' in entity_global_id:
                     ent = entity2id[entity_global_id['text']]
                 else:
+                    #数字であれば、entity2dを取得して、数字→辞書のmeage2xvみたなのに変換する。
                     ent = entity2id[entity_global_id]
-                if ent not in g2l:
-                    g2l[ent] = len(g2l)
+                if ent not in g2l: #まだg2lにentの値がないならば、
+                    g2l[ent] = len(g2l) #len(g2l)は何番目かを表している。そして、g2l={meagadag:0,gejgae:1,...}のようになる。
             except:
                 if entity_global_id not in g2l:
                     g2l[entity_global_id] = len(g2l)
@@ -593,6 +619,7 @@ class SingleDataLoader(BasicDataLoader):
     """
     Single Dataloader creates training/eval batches during KGQA.
     """
+    #bach単位でデータを読み込む
     def __init__(self, config, word2id, relation2id, entity2id, tokenize, data_type="train"):
         super(SingleDataLoader, self).__init__(config, word2id, relation2id, entity2id, tokenize, data_type)
         
@@ -630,6 +657,7 @@ class SingleDataLoader(BasicDataLoader):
 
 
 def load_dict(filename):
+    print('filename:',filename)
     word2id = dict()
     with open(filename, encoding='utf-8') as f_in:
         for line in f_in:
@@ -646,23 +674,29 @@ def load_dict_int(filename):
     return word2id
 
 def load_data(config, tokenize):
-
+    #ここで初めにload_dataを行う。
     """
     Creates train/val/test dataloaders (seperately).
     """
+    #train/val/testに分けて生成する。
+    # entity2idの取得 entitities.txtから取得
     if 'sr-cwq' in config['data_folder']:
         entity2id = load_dict_int(config['data_folder'] + config['entity2id'])
     else:
         entity2id = load_dict(config['data_folder'] + config['entity2id'])
+    # vocab.txtから取得
     word2id = load_dict(config['data_folder'] + config['word2id'])
+    # relations.txtから取得
     relation2id = load_dict(config['data_folder'] + config['relation2id'])
     
+    # evaluモードならtrainは読み込まない
     if config["is_eval"]:
         train_data = None
         valid_data = SingleDataLoader(config, word2id, relation2id, entity2id, tokenize, data_type="dev")
         test_data = SingleDataLoader(config, word2id, relation2id, entity2id, tokenize, data_type="test")
         num_word = test_data.num_word
     else:
+        # train_data,valid_data,test_dataを分けて読み込む
         train_data = SingleDataLoader(config, word2id, relation2id, entity2id, tokenize, data_type="train")
         valid_data = SingleDataLoader(config, word2id, relation2id, entity2id, tokenize, data_type="dev")
         test_data = SingleDataLoader(config, word2id, relation2id, entity2id, tokenize, data_type="test")
