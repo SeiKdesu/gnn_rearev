@@ -16,7 +16,7 @@
 
 # python main.py ReaRev --entity_dim 100 --num_epoch 20 --batch_size 4 --eval_every 2 --lm relbert --num_iter 2 --num_ins 3   --name cwq --experiment_name dim_100 --data_folder data/CWQ/ --warmup_epoch 80
 
-python main.py ReaRev --entity_dim 50 --num_epoch 100 --batch_size 8 --eval_every 2  --lm relbert --num_iter 2 --num_ins 3   --name cwq --experiment_name simpleQA-CWQ --data_folder data/webqsp/ --warmup_epoch 80 --load_experiment dim_50-28.ckpt
+python main.py ReaRev --entity_dim 50 --num_epoch 100 --batch_size 8 --eval_every 2  --lm relbert --num_iter 2 --num_ins 3   --name cwq --experiment_name simpleQA-cwq --data_folder data/CWQ/ --warmup_epoch 80 --load_experiment simpleQA-webqsp-66.ckpt
 
 # python main.py ReaRev --entity_dim 150 --num_epoch 20 --batch_size 6 --eval_every 2 --lm relbert --num_iter 2 --num_ins 3   --name cwq --experiment_name dim_150 --data_folder data/CWQ/ --warmup_epoch 80
 
