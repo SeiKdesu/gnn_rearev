@@ -16,6 +16,13 @@ class BaseModel(torch.nn.Module):
         self.num_relation = num_relation
         self.num_entity = num_entity
         self.num_word = num_word
+        target_rel_vocab_size = 7799
+        
+        # 実際の埋め込み層のサイズは、データセットのサイズとターゲットサイズの大きい方に合わせます
+        self.final_rel_vocab_size = max(num_relation + 1, target_rel_vocab_size)
+        
+        
+        
         print('Num Word', self.num_word)
         self.kge_frozen = args['kge_frozen']
         self.kg_dim = args['kg_dim']
@@ -123,7 +130,13 @@ class BaseModel(torch.nn.Module):
             np_tensor = self.load_relation_file(self.relation_emb_file)
             #print('check?', np_tensor.shape)
             rel_num, self.rel_dim = np_tensor.shape
-            self.relation_embedding = nn.Embedding(num_embeddings=num_relation+1, embedding_dim=self.rel_dim)
+            self.relation_embedding = nn.Embedding(num_embeddings=final_rel_vocab_size, embedding_dim=self.rel_dim)
+            # 読み込んだデータ(np_tensor)がターゲットサイズより小さい場合、0埋めを行う
+            if np_tensor.shape[0] < final_rel_vocab_size:
+                pad_size = final_rel_vocab_size - np_tensor.shape[0]
+                print(f"Padding relation embedding: {np_tensor.shape[0]} -> {final_rel_vocab_size}")
+                np_tensor = np.pad(np_tensor, ((0, pad_size), (0, 0)), 'constant', constant_values=0)
+                
             if rel_num != num_relation:
                  print('Number of relations in KG embeddings do not match: Random Init.')
             else:
@@ -135,15 +148,15 @@ class BaseModel(torch.nn.Module):
 
         elif self.relation_word_emb:
             self.rel_dim = self.entity_dim
-            self.relation_embedding = nn.Embedding(num_embeddings=num_relation+1, embedding_dim=self.rel_dim)
+            self.relation_embedding = nn.Embedding(num_embeddings=self.final_rel_vocab_size, embedding_dim=self.rel_dim)
             self.relation_embedding.weight.requires_grad = True
-            self.relation_embedding_inv = nn.Embedding(num_embeddings=num_relation+1, embedding_dim=self.rel_dim)
+            self.relation_embedding_inv = nn.Embedding(num_embeddings=self.final_rel_vocab_size, embedding_dim=self.rel_dim)
             self.relation_embedding_inv.weight.requires_grad = True
             pass
         else:
             self.rel_dim = 2*self.kg_dim 
-            self.relation_embedding = nn.Embedding(num_embeddings=num_relation+1, embedding_dim=self.rel_dim)
-            self.relation_embedding_inv = nn.Embedding(num_embeddings=num_relation+1, embedding_dim=self.rel_dim)
+            self.relation_embedding = nn.Embedding(num_embeddings=self.final_rel_vocab_size, embedding_dim=self.rel_dim)
+            self.relation_embedding_inv = nn.Embedding(num_embeddings=self.final_rel_vocab_size, embedding_dim=self.rel_dim)
 
         # initialize text embeddings
         
