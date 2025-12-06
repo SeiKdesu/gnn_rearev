@@ -72,6 +72,9 @@ def add_parse_args(parser):
     parser_rearev = subparsers.add_parser("ReaRev")
     create_parser_rearev(parser_rearev)
 
+    parser_drearev = subparsers.add_parser("DReaRev")
+    create_parser_drearev(parser_drearev)
+
     parser_nsm = subparsers.add_parser("NSM")
     create_parser_nsm(parser_nsm)
 
@@ -96,6 +99,28 @@ def create_parser_rearev(parser):
     parser.add_argument('--norm_rel', action='store_true')
     parser.add_argument('--data_eff', action='store_true')
     parser.add_argument('--pos_emb', action='store_true')
+    add_shared_args(parser)
+
+
+def create_parser_drearev(parser):
+    """
+    D-RAG (DReaRev) parser. Shares most args with ReaRev and adds differentiable selection knobs.
+    """
+    parser.add_argument('--model_name', default='DReaRev', type=str, choices=['DReaRev'])
+    parser.add_argument('--alg', default='bfs', type=str)
+    parser.add_argument('--num_iter', default=2, type=int)
+    parser.add_argument('--num_ins', default=3, type=int)
+    parser.add_argument('--num_gnn', default=6, type=int)
+    parser.add_argument('--loss_type', default='kl', type=str)
+    parser.add_argument('--use_self_loop', default=True, type=bool_flag)
+    parser.add_argument('--normalized_gnn', default=False, type=bool_flag)
+    parser.add_argument('--norm_rel', action='store_true')
+    parser.add_argument('--data_eff', action='store_true')
+    parser.add_argument('--pos_emb', action='store_true')
+    parser.add_argument('--drag_temperature', default=1.0, type=float)
+    parser.add_argument('--drag_prompt_dim', default=128, type=int)
+    parser.add_argument('--selector_hidden_dim', default=256, type=int)
+    parser.add_argument('--lambda_gen', default=1.0, type=float)
     add_shared_args(parser)
 
 

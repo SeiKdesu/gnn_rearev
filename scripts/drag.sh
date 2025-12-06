@@ -1,0 +1,1 @@
+python main.py DReaRev --data_folder data/webqsp/ --entity_dim 50 --kg_dim 100 --word_dim 300 --num_iter 2 --num_ins 3 --num_gnn 3 --batch_size 8 --num_epoch 50 --eval_every 2 --lr 5e-4 --fact_drop 0.0 --lm sbert --relation_word_emb True --drag_temperature 0.5 --selector_hidden_dim 256 --drag_prompt_dim 128 --lambda_gen 1.0 --experiment_name drearev-webqsp

@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+from dataclasses import dataclass
+from typing import Dict
 from torch.autograd import Variable
 import torch.nn.functional as F
 import torch.nn as nn
@@ -13,6 +15,35 @@ from modules.query_update import AttnEncoder, Fusion, QueryReform
 
 VERY_SMALL_NUMBER = 1e-10
 VERY_NEG_NUMBER = -100000000000
+
+
+@dataclass
+class GraphRepresentation:
+    """
+    Container for graph-aware embeddings produced by the ReaRev retriever.
+    """
+    entity_emb: torch.Tensor
+    relation_emb: torch.Tensor
+    fact_emb: torch.Tensor
+    meta: Dict[str, torch.Tensor]
+
+
+class FactSelectorHead(nn.Module):
+    """
+    Predicts Bernoulli probabilities for fact selection.
+    """
+    def __init__(self, in_dim, hidden_dim=256):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, F):  # F: [num_facts, in_dim]
+        logits = self.mlp(F).squeeze(-1)        # [num_facts]
+        probs = torch.sigmoid(logits)           # p_i
+        return logits, probs
 
 
 
@@ -137,6 +168,9 @@ class ReaRev(BaseModel):
         self.local_entity = local_entity
         self.instruction_list, self.attn_list = self.instruction(q_input)
         rel_features, rel_features_inv  = self.get_rel_feature()
+        # cache processed relation embeddings separately to avoid clobbering raw text encodings
+        self.rel_features_enc = rel_features
+        self.rel_features_inv_enc = rel_features_inv
         self.local_entity_emb = self.get_ent_init(local_entity, kb_adj_mat, rel_features)
         self.init_entity_emb = self.local_entity_emb
         self.curr_dist = curr_dist
@@ -151,6 +185,43 @@ class ReaRev(BaseModel):
                                    rel_features=rel_features,
                                    rel_features_inv=rel_features_inv,
                                    query_entities=query_entities)
+
+    def get_graph_representations(self, use_final_entity_state=True):
+        """
+        Exposes entity, relation, and fact-level embeddings for the current subgraph.
+        """
+        if not hasattr(self, "local_entity_emb"):
+            raise RuntimeError("Call init_reason/forward before requesting graph representations.")
+        if not hasattr(self.reasoning, "batch_heads"):
+            raise RuntimeError("ReasonGNNLayer has not been initialized with edge lists.")
+
+        entity_emb = self.local_entity_emb if use_final_entity_state else self.init_entity_emb
+        relation_emb = getattr(self, "rel_features_enc", None)
+        if relation_emb is None:
+            relation_emb = getattr(self, "rel_features", None)
+        if relation_emb is None and hasattr(self, "reasoning") and hasattr(self.reasoning, "rel_features"):
+            relation_emb = self.reasoning.rel_features
+
+        flat_entity = entity_emb.view(-1, entity_emb.size(-1))
+        head_emb = torch.index_select(flat_entity, 0, self.reasoning.batch_heads)
+        tail_emb = torch.index_select(flat_entity, 0, self.reasoning.batch_tails)
+        rel_emb = torch.index_select(relation_emb, 0, self.reasoning.batch_rels)
+        fact_emb = torch.cat([head_emb, rel_emb, tail_emb], dim=-1)
+
+        meta = {
+            "batch_ids": self.reasoning.batch_ids,
+            "head_index": self.reasoning.batch_heads,
+            "tail_index": self.reasoning.batch_tails,
+            "relation_index": self.reasoning.batch_rels,
+            "local_entity_ids": self.local_entity,
+            "max_local_entity": self.local_entity.size(1),
+        }
+        return GraphRepresentation(
+            entity_emb=entity_emb,
+            relation_emb=relation_emb,
+            fact_emb=fact_emb,
+            meta=meta,
+        )
 
 
     def calc_loss_label(self, curr_dist, teacher_dist, label_valid):

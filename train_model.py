@@ -16,6 +16,7 @@ tqdm.monitor_iterval = 0
 from dataset_load import load_data
 from dataset_load_graft import load_data_graft
 from models.ReaRev.rearev import ReaRev
+from models.DRAG.drearev import DReaRev
 
 # from models.NSM.nsm import NSM
 # from models.GraftNet.graftnet import GraftNet
@@ -39,6 +40,14 @@ class Trainer_KBQA(object):
         self.device = torch.device("cuda" if args["use_cuda"] else "cpu")
         self.reset_time = 0
         self.load_data(args, args["lm"])
+        self.id2entity = {idx: entity for entity, idx in self.entity2id.items()}
+        self.id2relation = {idx: relation for relation, idx in self.relation2id.items()}
+        if args.get("use_inverse_relation"):
+            num_rel_ori = len(self.id2relation)
+            for i in range(num_rel_ori):
+                self.id2relation[i + num_rel_ori] = self.id2relation[i] + "_rev"
+        if args.get("use_self_loop"):
+            self.id2relation[len(self.id2relation)] = "self_loop"
 
         if "decay_rate" in args:
             self.decay_rate = args["decay_rate"]
@@ -48,6 +57,15 @@ class Trainer_KBQA(object):
         if model_name == "ReaRev":
             self.model = ReaRev(
                 self.args, len(self.entity2id), self.num_kb_relation, self.num_word
+            )
+        elif model_name == "DReaRev":
+            self.model = DReaRev(
+                self.args,
+                len(self.entity2id),
+                self.num_kb_relation,
+                self.num_word,
+                id2entity=self.id2entity,
+                id2relation=self.id2relation,
             )
         # elif model_name == "NSM":
         #     self.model = NSM(
