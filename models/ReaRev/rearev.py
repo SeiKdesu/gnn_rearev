@@ -231,7 +231,7 @@ class ReaRev(BaseModel):
         return cur_loss
 
     
-    def forward(self, batch, training=False):
+    def forward(self, batch, training=False, fact_gate=None):
         """
         Forward function: creates instructions and performs GNN reasoning.
         """
@@ -278,7 +278,7 @@ class ReaRev(BaseModel):
             relation_ins = torch.cat(self.instruction.instructions, dim=1)
             self.curr_dist = current_dist            
             for j in range(self.num_gnn):
-                self.curr_dist, global_rep = self.reasoning(self.curr_dist, relation_ins, step=j)
+                self.curr_dist, global_rep = self.reasoning(self.curr_dist, relation_ins, step=j, fact_gate=fact_gate)
             self.dist_history.append(self.curr_dist)
             qs = []
 

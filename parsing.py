@@ -121,6 +121,7 @@ def create_parser_drearev(parser):
     parser.add_argument('--drag_prompt_dim', default=128, type=int)
     parser.add_argument('--selector_hidden_dim', default=256, type=int)
     parser.add_argument('--lambda_gen', default=1.0, type=float)
+    parser.add_argument('--lambda_sel', default=0.0, type=float)
     add_shared_args(parser)
 
 

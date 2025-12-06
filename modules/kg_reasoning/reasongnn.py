@@ -58,7 +58,7 @@ class ReasonGNNLayer(BaseGNNLayer):
         self.query_entities = query_entities
        
 
-    def reason_layer(self, curr_dist, instruction, rel_linear, pos_emb):
+    def reason_layer(self, curr_dist, instruction, rel_linear, pos_emb, fact_gate=None):
         """
         Aggregates neighbor representations
         """
@@ -80,6 +80,10 @@ class ReasonGNNLayer(BaseGNNLayer):
         fact_prior = torch.sparse.mm(self.head2fact_mat, curr_dist.view(-1, 1))
 
         fact_val = fact_val * fact_prior
+        if fact_gate is not None:
+            if fact_gate.dim() == 1:
+                fact_gate = fact_gate.unsqueeze(1)
+            fact_val = fact_val * fact_gate
         
         f2e_emb = torch.sparse.mm(self.fact2tail_mat, fact_val)
         assert not torch.isnan(f2e_emb).any()
@@ -88,7 +92,7 @@ class ReasonGNNLayer(BaseGNNLayer):
         
         return neighbor_rep
 
-    def reason_layer_inv(self, curr_dist, instruction, rel_linear, pos_emb_inv):
+    def reason_layer_inv(self, curr_dist, instruction, rel_linear, pos_emb_inv, fact_gate=None):
         batch_size = self.batch_size
         max_local_entity = self.max_local_entity
         # num_relation = self.num_relation
@@ -107,6 +111,10 @@ class ReasonGNNLayer(BaseGNNLayer):
         
 
         fact_val = fact_val * fact_prior
+        if fact_gate is not None:
+            if fact_gate.dim() == 1:
+                fact_gate = fact_gate.unsqueeze(1)
+            fact_val = fact_val * fact_gate
 
         f2e_emb = torch.sparse.mm(self.fact2head_mat, fact_val)
         assert not torch.isnan(f2e_emb).any()
@@ -131,7 +139,7 @@ class ReasonGNNLayer(BaseGNNLayer):
         current_dist = self.softmax_d1(score_tp)
         return current_dist, local_emb
 
-    def forward(self, current_dist, relational_ins, step=0, return_score=False):
+    def forward(self, current_dist, relational_ins, step=0, return_score=False, fact_gate=None):
         """
         Compute next probabilistic vectors and current node representations.
         """
@@ -149,10 +157,10 @@ class ReasonGNNLayer(BaseGNNLayer):
 
         for j in range(relational_ins.size(1)):
             # we do the same procedure for existing and inverse relations
-            neighbor_rep = self.reason_layer(current_dist, relational_ins[:,j,:], rel_linear, pos_emb)
+            neighbor_rep = self.reason_layer(current_dist, relational_ins[:,j,:], rel_linear, pos_emb, fact_gate=fact_gate)
             neighbor_reps.append(neighbor_rep)
 
-            neighbor_rep = self.reason_layer_inv(current_dist, relational_ins[:,j,:], rel_linear, pos_emb_inv)
+            neighbor_rep = self.reason_layer_inv(current_dist, relational_ins[:,j,:], rel_linear, pos_emb_inv, fact_gate=fact_gate)
             neighbor_reps.append(neighbor_rep)
 
         neighbor_reps = torch.cat(neighbor_reps, dim=2)

@@ -114,6 +114,7 @@ class DReaRev(ReaRev):
         prompt_dim = args.get("drag_prompt_dim", self.entity_dim)
         self.drag_temperature = args.get("drag_temperature", 1.0)
         self.lambda_gen = args.get("lambda_gen", 1.0)
+        self.lambda_sel = args.get("lambda_sel", 0.0)
 
         self.fact_selector = FactSelectorHead(in_dim=3 * self.entity_dim, hidden_dim=selector_hidden)
         self.prompt_builder = NeuralFactPromptBuilder(
@@ -123,6 +124,7 @@ class DReaRev(ReaRev):
             id2relation=id2relation,
         )
         self.generator: Optional[Callable[..., torch.Tensor]] = None
+        self.bce_selector = nn.BCEWithLogitsLoss()
 
     def set_generator(self, generator_fn: Callable[..., torch.Tensor]):
         """
@@ -132,8 +134,12 @@ class DReaRev(ReaRev):
         self.generator = generator_fn
 
     def forward(self, batch, training=False):
-        # Preserve ReaRev behaviour for compatibility with existing trainer/evaluator.
-        return super().forward(batch, training=training)
+        """
+        Override forward to run D-RAG pipeline (fact selection + gated reasoning).
+        Returns same tuple interface as ReaRev: loss, pred, pred_dist, tp_list.
+        """
+        out = self.forward_drag(batch, training=training)
+        return out["loss"], out["pred"], out["pred_dist"], out["tp_list"]
 
     def forward_drag(
         self,
@@ -150,7 +156,8 @@ class DReaRev(ReaRev):
         - prompt: neural fact prompt assembly
         - generator: optional callable to compute generator loss
         """
-        retriever_loss, pred, pred_dist, tp_list = super().forward(batch, training=training)
+        # 1) Run vanilla ReaRev to build graph representations (grad-tracked).
+        retriever_loss_base, _, _, _ = super().forward(batch, training=training)
 
         graph_repr = self.get_graph_representations(use_final_entity_state=True)
         logits, probs = self.fact_selector(graph_repr.fact_emb)
@@ -170,21 +177,56 @@ class DReaRev(ReaRev):
             prompt=prompt,
         )
 
+        # 3) Optional weak supervision for selector using answer entities.
+        selection_loss = None
+        lambda_sel = self.lambda_sel
+        if lambda_sel > 0:
+            selection_labels = self._label_answer_facts(graph_repr, batch[-1])
+            selection_loss = self.bce_selector(logits, selection_labels)
+
+        # 4) Run gated reasoning pass using sampled selections.
+        retriever_loss_gated, pred, pred_dist, tp_list = super().forward(batch, training=training, fact_gate=selections)
+
         generator_loss = None
         gen_fn = generator_loss_fn or self.generator
         if gen_fn is not None:
             generator_loss = gen_fn(prompt, struct_emb, selections)
 
-        total_loss = retriever_loss
+        total_loss = retriever_loss_gated
+        if selection_loss is not None:
+            total_loss = total_loss + lambda_sel * selection_loss
         if generator_loss is not None:
             total_loss = total_loss + self.lambda_gen * generator_loss
 
         return {
             "loss": total_loss,
-            "retriever_loss": retriever_loss,
+            "retriever_loss": retriever_loss_gated,
             "generator_loss": generator_loss,
+            "selection_loss": selection_loss,
             "pred": pred,
             "pred_dist": pred_dist,
             "tp_list": tp_list,
             "selection": selection_output,
         }
+
+    def _label_answer_facts(self, graph_repr: GraphRepresentation, answer_dist_np: Any) -> torch.Tensor:
+        """
+        Builds weak labels for facts: 1 if head or tail is an answer entity in the local graph.
+        """
+        if not torch.is_tensor(answer_dist_np):
+            answer_dist = torch.from_numpy(answer_dist_np).to(graph_repr.fact_emb.device)
+        else:
+            answer_dist = answer_dist_np.to(graph_repr.fact_emb.device)
+        max_local = graph_repr.meta["max_local_entity"]
+        batch_ids = graph_repr.meta["batch_ids"]
+        heads = graph_repr.meta["head_index"]
+        tails = graph_repr.meta["tail_index"]
+
+        head_local = heads - batch_ids * max_local
+        tail_local = tails - batch_ids * max_local
+        head_local = torch.clamp(head_local, min=0, max=answer_dist.size(1) - 1)
+        tail_local = torch.clamp(tail_local, min=0, max=answer_dist.size(1) - 1)
+        head_is_ans = answer_dist[batch_ids, head_local]
+        tail_is_ans = answer_dist[batch_ids, tail_local]
+        labels = ((head_is_ans + tail_is_ans) > 0).float()
+        return labels
