@@ -10,6 +10,7 @@ from modules.question_encoding.lstm_encoder import LSTMInstruction
 from modules.question_encoding.bert_encoder import BERTInstruction
 from modules.layer_init import TypeLayer
 from modules.query_update import AttnEncoder, Fusion, QueryReform
+from .subgraph_sampler import DifferentiableSubgraphSampler
 
 VERY_SMALL_NUMBER = 1e-10
 VERY_NEG_NUMBER = -100000000000
@@ -26,7 +27,7 @@ class ReaRev(BaseModel):
         #self.share_module_def()
         self.norm_rel = args['norm_rel']
         self.layers(args)
-        
+
 
         self.loss_type =  args['loss_type']
         self.num_iter = args['num_iter']
@@ -35,7 +36,7 @@ class ReaRev(BaseModel):
         self.alg = args['alg']
         assert self.alg == 'bfs'
         self.lm = args['lm']
-        
+
         self.private_module_def(args, num_entity, num_relation)
 
         self.to(self.device)
@@ -56,7 +57,7 @@ class ReaRev(BaseModel):
 
         #self.lstm_dropout = args['lstm_dropout']
         self.linear_dropout = args['linear_dropout']
-        
+
         self.entity_linear = nn.Linear(in_features=self.ent_dim, out_features=entity_dim)
         self.relation_linear = nn.Linear(in_features=self.rel_dim, out_features=entity_dim)
         # self.relation_linear_inv = nn.Linear(in_features=self.rel_dim, out_features=entity_dim)
@@ -84,10 +85,10 @@ class ReaRev(BaseModel):
         else:
             local_entity_emb = self.entity_embedding(local_entity)  # batch_size, max_local_entity, word_dim
             local_entity_emb = self.entity_linear(local_entity_emb)
-        
+
         return local_entity_emb
-    
-   
+
+
     def get_rel_feature(self):
         """
         Encode relation tokens to vectors.
@@ -98,10 +99,10 @@ class ReaRev(BaseModel):
             rel_features = self.relation_linear(rel_features)
             rel_features_inv = self.relation_linear(rel_features_inv)
         else:
-            
+
             rel_features = self.instruction.question_emb(self.rel_features)
             rel_features_inv = self.instruction.question_emb(self.rel_features_inv)
-            
+
             rel_features = self.self_att_r(rel_features,  (self.rel_texts != self.instruction.pad_val).float())
             rel_features_inv = self.self_att_r(rel_features_inv,  (self.rel_texts != self.instruction.pad_val).float())
             if self.lm == 'lstm':
@@ -120,6 +121,18 @@ class ReaRev(BaseModel):
         kg_dim = self.kg_dim
         entity_dim = self.entity_dim
         self.reasoning = ReasonGNNLayer(args, num_entity, num_relation, entity_dim, self.alg)
+
+        # ▼▼▼ 追加: D-RAG用サンプラーの定義 ▼▼▼
+        # temperatureはハイパーパラメータとしてargsから取得するのが理想ですが、デフォルト1.0でも可
+        temp = args.get('gumbel_temp', 1.0)
+        self.subgraph_sampler = DifferentiableSubgraphSampler(
+            entity_dim=self.entity_dim,
+            rel_dim=self.entity_dim, # ReaRevではRelationも射影されてEntityと同じ次元
+            temperature=temp
+        )
+        # ▲▲▲ 追加ここまで ▲▲▲
+
+
         if args['lm'] == 'lstm':
             self.instruction = LSTMInstruction(args, self.word_embedding, self.num_word)
             self.relation_linear = nn.Linear(in_features=entity_dim, out_features=entity_dim)
@@ -143,8 +156,8 @@ class ReaRev(BaseModel):
         self.dist_history = []
         self.action_probs = []
         self.seed_entities = curr_dist
-        
-        self.reasoning.init_reason( 
+
+        self.reasoning.init_reason(
                                    local_entity=local_entity,
                                    kb_adj_mat=kb_adj_mat,
                                    local_entity_emb=self.local_entity_emb,
@@ -159,7 +172,7 @@ class ReaRev(BaseModel):
         cur_loss = torch.sum(tp_loss) / curr_dist.size(0)
         return cur_loss
 
-    
+
     def forward(self, batch, training=False):
         """
         Forward function: creates instructions and performs GNN reasoning.
@@ -179,11 +192,11 @@ class ReaRev(BaseModel):
         if self.lm != 'lstm':
             pad_val = self.instruction.pad_val #tokenizer.convert_tokens_to_ids(self.instruction.tokenizer.pad_token)
             query_mask = (q_input != pad_val).float()
-            
+
         else:
             query_mask = (q_input != self.num_word).float()
 
-        
+
         """
         Instruction generations
         """
@@ -191,7 +204,7 @@ class ReaRev(BaseModel):
                          kb_adj_mat=kb_adj_mat, q_input=q_input, query_entities=query_entities)
         self.instruction.init_reason(q_input)
         for i in range(self.num_ins):
-            relational_ins, attn_weight = self.instruction.get_instruction(self.instruction.relational_ins, step=i) 
+            relational_ins, attn_weight = self.instruction.get_instruction(self.instruction.relational_ins, step=i)
             self.instruction.instructions.append(relational_ins.unsqueeze(1))
             self.instruction.relational_ins = relational_ins
         #relation_ins = torch.cat(self.instruction.instructions, dim=1)
@@ -205,7 +218,7 @@ class ReaRev(BaseModel):
 
         for t in range(self.num_iter):
             relation_ins = torch.cat(self.instruction.instructions, dim=1)
-            self.curr_dist = current_dist            
+            self.curr_dist = current_dist
             for j in range(self.num_gnn):
                 self.curr_dist, global_rep = self.reasoning(self.curr_dist, relation_ins, step=j)
             self.dist_history.append(self.curr_dist)
@@ -219,8 +232,8 @@ class ReaRev(BaseModel):
                 q = reform(self.instruction.instructions[j].squeeze(1), global_rep, query_entities, local_entity)
                 qs.append(q.unsqueeze(1))
                 self.instruction.instructions[j] = q.unsqueeze(1)
-        
-        
+
+
         """
         Answer Predictions
         """
@@ -232,14 +245,50 @@ class ReaRev(BaseModel):
         # for pred_dist in self.dist_history:
         loss = self.calc_loss_label(curr_dist=pred_dist, teacher_dist=answer_dist, label_valid=case_valid)
 
+        # ▼▼▼ 追加: D-RAG サブグラフサンプリング処理 ▼▼▼
+
+        # A. エッジ(Fact)情報の展開
+        # dataset_load.py (line 396付近) の _build_fact_mat の戻り値構造に対応
+        # kb_adj_mat = (batch_heads, batch_rels, batch_tails, batch_ids, fact_ids, ...)
+        batch_heads, batch_rels, batch_tails, batch_ids, fact_ids, weight_list, weight_rel_list = kb_adj_mat
+
+        # インデックスをTensor化
+        batch_heads = torch.LongTensor(batch_heads).to(self.device)
+        batch_rels = torch.LongTensor(batch_rels).to(self.device)
+        batch_tails = torch.LongTensor(batch_tails).to(self.device)
+        batch_ids = torch.LongTensor(batch_ids).to(self.device) # エッジがバッチ内のどのサンプルに属するか
+
+        # B. 埋め込みの取得 (Gather処理)
+        # self.local_entity_emb: (Batch_Size, Max_Local_Entity, Dim)
+        # [batch_ids, batch_heads] で、バッチ内の特定サンプルの特定ノードの埋め込みを一括取得できます
+
+        flat_entity_emb = self.local_entity_emb.view(-1, self.entity_dim) # (Batch * Max_Local_Entity, Dim)
         
+        head_embs = flat_entity_emb[batch_heads] # (Num_Total_Facts, Dim)
+        tail_embs = flat_entity_emb[batch_tails] # (Num_Total_Facts, Dim)
+        
+        # Relation埋め込みの取得 (ここは変更なし)
+        rel_features, _ = self.get_rel_feature() 
+        fact_rel_embs = torch.index_select(rel_features, 0, batch_rels) 
+
+        # NaNチェック (デバッグ用: 必要に応じて残す)
+        if torch.isnan(head_embs).any(): print("NaN in head_embs")
+        
+        # 3. 微分可能サンプリングの実行
+        selection_probs, selection_mask = self.subgraph_sampler(
+            head_embs, fact_rel_embs, tail_embs, is_eval=not training
+        )
+        # ▲▲▲ 追加ここまで ▲▲▲
+
+
+
         pred_dist = self.dist_history[-1]
         pred = torch.max(pred_dist, dim=1)[1]
         if training:
             h1, f1 = self.get_eval_metric(pred_dist, answer_dist)
             tp_list = [h1.tolist(), f1.tolist()]
+            return loss, pred, pred_dist, tp_list, selection_probs,selection_mask
         else:
             tp_list = None
-        return loss, pred, pred_dist, tp_list
+            return loss, pred, pred_dist, tp_list, selection_probs,selection_mask
 
-    

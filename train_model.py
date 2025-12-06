@@ -321,7 +321,8 @@ class Trainer_KBQA(object):
             )
 
             self.optim_model.zero_grad()
-            loss, _, _, tp_list = self.model(batch, training=True)
+            # loss, _, _, tp_list = self.model(batch, training=True)
+            loss, _, _, tp_list, selection_probs, selection_mask = self.model(batch, training=True)
             # if tp_list is not None:
             h1_list, f1_list = tp_list
             h1_list_all.extend(h1_list)

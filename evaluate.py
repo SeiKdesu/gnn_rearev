@@ -157,7 +157,7 @@ class Evaluator:
         for iteration in tqdm(range(num_epoch)):
             batch = valid_data.get_batch(iteration, test_batch_size, fact_dropout=0.0, test=True)
             with torch.no_grad():
-                loss, extras, pred_dist, tp_list = self.model(batch[:-1])
+                loss, extras, pred_dist, tp_list, selection_probs, selection_mask = self.model(batch[:-1])
                 pred = torch.max(pred_dist, dim=1)[1]
             if self.model_name == 'GraftNet':
                 local_entity, query_entities, _, _, query_text, _, \
