@@ -55,6 +55,14 @@ class AttnEncoder(nn.Module):
         x_mask: (B, len)
         return: (B, d_hid)
         """
+        # Guard against swapped dimensions (len, B) masks or features.
+        if x_mask.dim() == 2 and x_mask.shape[0] != x.shape[0] and x_mask.shape[1] == x.shape[0]:
+            x_mask = x_mask.transpose(0, 1)
+        if x_mask.dim() == 2 and x.shape[0] != x_mask.shape[0] and x.shape[1] == x_mask.shape[0] and x_mask.shape[1] == x.shape[0]:
+            x = x.transpose(0, 1)
+        if x_mask.shape[0] != x.shape[0] or x_mask.shape[1] != x.shape[1]:
+            raise ValueError(f"x_mask shape {x_mask.shape} not aligned with x {x.shape}")
+
         x_attn = self.attn_linear(x)
         x_attn = x_attn - (1 - x_mask.unsqueeze(2))*1e8
         x_attn = F.softmax(x_attn, dim=1)
