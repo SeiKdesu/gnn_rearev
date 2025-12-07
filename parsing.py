@@ -26,13 +26,13 @@ def add_shared_args(parser):
     parser.add_argument('--word_emb_file', default='word_emb.npy', type=str)
     parser.add_argument('--rel_word_ids', default='rel_word_idx.npy', type=str)
     parser.add_argument('--kge_frozen', default=0, type=int)
-    parser.add_argument('--lm', default='lstm', type=str, choices=['lstm', 'bert', 'roberta', 'sbert', 't5','sbert2', 'dbert', 'simcse', 'relbert'])
+    parser.add_argument('--lm', default='relbert', type=str, choices=['lstm', 'bert', 'roberta', 'sbert', 't5','sbert2', 'dbert', 'simcse', 'relbert'])
     parser.add_argument('--lm_frozen', default=1, type=int)
 
     # dimensions, layers, dropout
     parser.add_argument('--entity_dim', default=50, type=int)
     parser.add_argument('--kg_dim', default=100, type=int)
-    parser.add_argument('--word_dim', default=300, type=int)
+    parser.add_argument('--word_dim', default=768, type=int)
     parser.add_argument('--lm_dropout', default=0.3, type=float)
     parser.add_argument('--linear_dropout', default=0.2, type=float)
 
