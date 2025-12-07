@@ -7,7 +7,7 @@ VERY_NEG_NUMBER = -100000000000
 
 class BaseInstruction(torch.nn.Module):
 
-    def __init__(self, args, constraint):
+    def __init__(self, args, constraint=False):
         super(BaseInstruction, self).__init__()
         self.constraint = constraint
         self._parse_args(args)
