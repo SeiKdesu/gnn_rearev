@@ -29,6 +29,8 @@ class FactSelectionOutput:
     structural_emb: torch.Tensor
     semantic_texts: List[str]
     prompt: str
+    batch_ids: Optional[torch.Tensor] = None
+    meta: Optional[Dict[str, torch.Tensor]] = None
 
 
 class NeuralFactPromptBuilder(nn.Module):
@@ -115,6 +117,9 @@ class DReaRev(ReaRev):
         self.drag_temperature = args.get("drag_temperature", 1.0)
         self.lambda_gen = args.get("lambda_gen", 1.0)
         self.lambda_sel = args.get("lambda_sel", 0.0)
+        self.lambda_sparse = args.get("selector_sparsity_weight", 0.0)
+        self.selector_target_ratio = args.get("selector_sparsity_target", None)
+        self.lambda_entropy = args.get("selector_entropy_weight", 0.0)
 
         self.fact_selector = FactSelectorHead(in_dim=3 * self.entity_dim, hidden_dim=selector_hidden)
         self.prompt_builder = NeuralFactPromptBuilder(
@@ -125,6 +130,7 @@ class DReaRev(ReaRev):
         )
         self.generator: Optional[Callable[..., torch.Tensor]] = None
         self.bce_selector = nn.BCEWithLogitsLoss()
+        self.last_selection_metrics: Optional[Dict[str, float]] = None
 
     def set_generator(self, generator_fn: Callable[..., torch.Tensor]):
         """
@@ -155,6 +161,7 @@ class DReaRev(ReaRev):
         - selector: differentiable fact sampling via Gumbel-Softmax
         - prompt: neural fact prompt assembly
         - generator: optional callable to compute generator loss
+        - subgraph: optional selector regularizers (coverage, sparsity, entropy) to learn compact answer-focused subgraphs
         """
         # 1) Run vanilla ReaRev to build graph representations (grad-tracked).
         retriever_loss_base, _, _, _ = super().forward(batch, training=training)
@@ -175,14 +182,34 @@ class DReaRev(ReaRev):
             structural_emb=struct_emb,
             semantic_texts=semantic_texts,
             prompt=prompt,
+            batch_ids=graph_repr.meta.get("batch_ids", None),
+            meta=graph_repr.meta,
         )
 
         # 3) Optional weak supervision for selector using answer entities.
+        selection_labels = self._label_answer_facts(graph_repr, batch[-1])
         selection_loss = None
         lambda_sel = self.lambda_sel
         if lambda_sel > 0:
-            selection_labels = self._label_answer_facts(graph_repr, batch[-1])
             selection_loss = self.bce_selector(logits, selection_labels)
+
+        # Encourage compact subgraphs while keeping gradients smooth.
+        sparsity_loss = None
+        if self.lambda_sparse > 0:
+            mean_sel = selections.mean()
+            if self.selector_target_ratio is None:
+                sparsity_loss = mean_sel
+            else:
+                target = torch.tensor(self.selector_target_ratio, device=selections.device, dtype=selections.dtype)
+                sparsity_loss = (mean_sel - target).abs()
+
+        entropy_loss = None
+        if self.lambda_entropy > 0:
+            probs_for_entropy = probs.clamp(min=1e-6, max=1 - 1e-6)
+            entropy_loss = -(
+                probs_for_entropy * torch.log(probs_for_entropy) +
+                (1 - probs_for_entropy) * torch.log(1 - probs_for_entropy)
+            ).mean()
 
         # 4) Run gated reasoning pass using sampled selections.
         retriever_loss_gated, pred, pred_dist, tp_list = super().forward(batch, training=training, fact_gate=selections)
@@ -195,6 +222,10 @@ class DReaRev(ReaRev):
         total_loss = retriever_loss_gated
         if selection_loss is not None:
             total_loss = total_loss + lambda_sel * selection_loss
+        if sparsity_loss is not None:
+            total_loss = total_loss + self.lambda_sparse * sparsity_loss
+        if entropy_loss is not None:
+            total_loss = total_loss + self.lambda_entropy * entropy_loss
         if generator_loss is not None:
             total_loss = total_loss + self.lambda_gen * generator_loss
 
@@ -203,11 +234,56 @@ class DReaRev(ReaRev):
             "retriever_loss": retriever_loss_gated,
             "generator_loss": generator_loss,
             "selection_loss": selection_loss,
+            "sparsity_loss": sparsity_loss,
+            "entropy_loss": entropy_loss,
             "pred": pred,
             "pred_dist": pred_dist,
             "tp_list": tp_list,
             "selection": selection_output,
+            "selection_metrics": self._compute_selection_metrics(
+                selection_output=selection_output,
+                labels=selection_labels,
+            ),
         }
+
+    def _compute_selection_metrics(
+        self,
+        selection_output: FactSelectionOutput,
+        labels: Optional[torch.Tensor],
+    ) -> Optional[Dict[str, float]]:
+        """
+        Computes simple precision/recall/F1 for selected facts vs. weak labels.
+        Used for subgraph quality monitoring; returns None if labels not provided.
+        """
+        if labels is None:
+            self.last_selection_metrics = None
+            return None
+        preds = (selection_output.selections > 0.5).float()
+        labels = labels.float()
+        tp = torch.sum(preds * labels)
+        fp = torch.sum(preds) - tp
+        fn = torch.sum(labels) - tp
+        precision = tp / (tp + fp + 1e-8) if (tp + fp) > 0 else torch.tensor(0.0, device=preds.device)
+        recall = tp / (tp + fn + 1e-8) if (tp + fn) > 0 else torch.tensor(0.0, device=preds.device)
+        f1 = (
+            2 * precision * recall / (precision + recall + 1e-8)
+            if (precision + recall) > 0
+            else torch.tensor(0.0, device=preds.device)
+        )
+        coverage = torch.sum(selection_output.probs * labels) / (torch.sum(labels) + 1e-8)
+        sparsity = torch.mean(selection_output.selections)
+        metrics = {
+            "subgraph_precision": precision.detach().cpu().item(),
+            "subgraph_recall": recall.detach().cpu().item(),
+            "subgraph_f1": f1.detach().cpu().item(),
+            "subgraph_coverage": coverage.detach().cpu().item(),
+            "subgraph_sparsity": sparsity.detach().cpu().item(),
+            "num_facts": selection_output.selections.numel(),
+            "num_labeled_pos": torch.sum(labels).detach().cpu().item(),
+            "num_selected": torch.sum(preds).detach().cpu().item(),
+        }
+        self.last_selection_metrics = metrics
+        return metrics
 
     def _label_answer_facts(self, graph_repr: GraphRepresentation, answer_dist_np: Any) -> torch.Tensor:
         """

@@ -104,7 +104,7 @@ def create_parser_rearev(parser):
 
 def create_parser_drearev(parser):
     """
-    D-RAG (DReaRev) parser. Shares most args with ReaRev and adds differentiable selection knobs.
+    D-RAG (DReaRev) parser. Shares most args with ReaRev and adds differentiable selection knobs and selector regularizers for compact subgraphs.
     """
     parser.add_argument('--model_name', default='DReaRev', type=str, choices=['DReaRev'])
     parser.add_argument('--alg', default='bfs', type=str)
@@ -122,6 +122,9 @@ def create_parser_drearev(parser):
     parser.add_argument('--selector_hidden_dim', default=256, type=int)
     parser.add_argument('--lambda_gen', default=1.0, type=float)
     parser.add_argument('--lambda_sel', default=0.0, type=float)
+    parser.add_argument('--selector_sparsity_weight', default=0.0, type=float)
+    parser.add_argument('--selector_sparsity_target', default=None, type=float)
+    parser.add_argument('--selector_entropy_weight', default=0.0, type=float)
     add_shared_args(parser)
 
 

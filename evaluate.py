@@ -145,6 +145,7 @@ class Evaluator:
         id2entity = self.id2entity
         eval_loss, eval_acc, eval_max_acc = [], [], []
         f1s, hits, ems,  precisions, recalls = [], [], [], [], []
+        subgraph_metrics_all = []
         valid_data.reset_batches(is_sequential=True)
         num_epoch = math.ceil(valid_data.num_data / test_batch_size)
         if write_info and self.file_write is None:
@@ -156,8 +157,20 @@ class Evaluator:
         ignore_prob = (1 - eps) / max_local_entity
         for iteration in tqdm(range(num_epoch)):
             batch = valid_data.get_batch(iteration, test_batch_size, fact_dropout=0.0, test=True)
+            selection_metrics = None
+            selection_dump = None
             with torch.no_grad():
-                loss, extras, pred_dist, tp_list = self.model(batch[:-1])
+                if self.model_name == 'DReaRev' and hasattr(self.model, "forward_drag"):
+                    out = self.model.forward_drag(batch[:-1], training=False)
+                    loss = out["loss"]
+                    pred_dist = out["pred_dist"]
+                    tp_list = out["tp_list"]
+                    selection_metrics = out.get("selection_metrics")
+                    selection_dump = out.get("selection")
+                    if selection_metrics is not None:
+                        subgraph_metrics_all.append(selection_metrics)
+                else:
+                    loss, extras, pred_dist, tp_list = self.model(batch[:-1])
                 pred = torch.max(pred_dist, dim=1)[1]
             if self.model_name == 'GraftNet':
                 local_entity, query_entities, _, _, query_text, _, \
@@ -216,6 +229,22 @@ class Evaluator:
                     tp_obj['hit'] = hit
                     tp_obj['em'] = em
                     tp_obj['cand'] = retrived
+                    if self.model_name == 'DReaRev' and selection_metrics is not None:
+                        tp_obj['subgraph_metrics'] = selection_metrics
+                    if self.model_name == 'DReaRev' and selection_dump is not None:
+                        try:
+                            batch_ids = selection_dump.batch_ids.detach().cpu().tolist() if selection_dump.batch_ids is not None else [0] * len(selection_dump.semantic_texts)
+                            probs_sel = selection_dump.probs.detach().cpu().tolist()
+                            sels = selection_dump.selections.detach().cpu().tolist()
+                            facts = selection_dump.semantic_texts
+                            selected = []
+                            for idx, (p, s, b) in enumerate(zip(probs_sel, sels, batch_ids)):
+                                if b == batch_id:
+                                    selected.append({"prob": float(p), "sel": float(s), "fact": facts[idx]})
+                            selected = sorted(selected, key=lambda x: x["prob"], reverse=True)[:15]
+                            tp_obj['selected_facts'] = selected
+                        except Exception:
+                            pass
                     self.file_write.write(json.dumps(tp_obj) + "\n")
                 case_ct.setdefault(case, 0)
                 case_ct[case] += 1
@@ -232,6 +261,11 @@ class Evaluator:
         print('avg_f1', np.mean(f1s))
         print('avg_precision', np.mean(precisions))
         print('avg_recall', np.mean(recalls))
+
+        if len(subgraph_metrics_all) > 0:
+            keys = subgraph_metrics_all[0].keys()
+            avg_subgraph = {k: float(np.mean([m[k] for m in subgraph_metrics_all])) for k in keys}
+            print('subgraph_metrics', avg_subgraph)
         
         print(case_ct)
         if write_info:
