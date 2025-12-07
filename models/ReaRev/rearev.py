@@ -157,9 +157,6 @@ class ReaRev(BaseModel):
 
             rel_features = self.self_att_r(rel_features, rel_mask)
             rel_features_inv = self.self_att_r(rel_features_inv, rel_mask_inv)
-            if self.lm == 'lstm':
-                rel_features = self.self_att_r(rel_features, (self.rel_texts != self.num_relation+1).float())
-                rel_features_inv = self.self_att_r(rel_features_inv, (self.rel_texts_inv != self.num_relation+1).float())
 
         return rel_features, rel_features_inv
 
