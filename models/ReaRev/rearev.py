@@ -129,10 +129,14 @@ class ReaRev(BaseModel):
             rel_features = self.relation_linear(rel_features)
             rel_features_inv = self.relation_linear(rel_features_inv)
         else:
-            
-            rel_features = self.instruction.question_emb(self.rel_features)
-            rel_features_inv = self.instruction.question_emb(self.rel_features_inv)
-            
+            # For LSTM, rel_features already encoded to entity_dim; skip question_emb projection.
+            if self.lm == 'lstm':
+                rel_features = self.rel_features
+                rel_features_inv = self.rel_features_inv
+            else:
+                rel_features = self.instruction.question_emb(self.rel_features)
+                rel_features_inv = self.instruction.question_emb(self.rel_features_inv)
+
             rel_features = self.self_att_r(rel_features,  (self.rel_texts != self.instruction.pad_val).float())
             rel_features_inv = self.self_att_r(rel_features_inv,  (self.rel_texts != self.instruction.pad_val).float())
             if self.lm == 'lstm':
