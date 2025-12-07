@@ -137,8 +137,26 @@ class ReaRev(BaseModel):
                 rel_features = self.instruction.question_emb(self.rel_features)
                 rel_features_inv = self.instruction.question_emb(self.rel_features_inv)
 
-            rel_features = self.self_att_r(rel_features,  (self.rel_texts != self.instruction.pad_val).float())
-            rel_features_inv = self.self_att_r(rel_features_inv,  (self.rel_texts != self.instruction.pad_val).float())
+            # ensure shapes are B x L x D before attention
+            if rel_features.dim() == 2:
+                rel_features = rel_features.unsqueeze(1)
+            if rel_features_inv.dim() == 2:
+                rel_features_inv = rel_features_inv.unsqueeze(1)
+
+            rel_mask = (self.rel_texts != self.instruction.pad_val).float()
+            rel_mask_inv = (self.rel_texts_inv != self.instruction.pad_val).float() if hasattr(self, "rel_texts_inv") else rel_mask
+            # align mask length to features length if mismatch
+            if rel_mask.size(1) != rel_features.size(1):
+                min_len = min(rel_mask.size(1), rel_features.size(1))
+                rel_mask = rel_mask[:, :min_len]
+                rel_features = rel_features[:, :min_len, :]
+            if rel_mask_inv.size(1) != rel_features_inv.size(1):
+                min_len = min(rel_mask_inv.size(1), rel_features_inv.size(1))
+                rel_mask_inv = rel_mask_inv[:, :min_len]
+                rel_features_inv = rel_features_inv[:, :min_len, :]
+
+            rel_features = self.self_att_r(rel_features, rel_mask)
+            rel_features_inv = self.self_att_r(rel_features_inv, rel_mask_inv)
             if self.lm == 'lstm':
                 rel_features = self.self_att_r(rel_features, (self.rel_texts != self.num_relation+1).float())
                 rel_features_inv = self.self_att_r(rel_features_inv, (self.rel_texts_inv != self.num_relation+1).float())
