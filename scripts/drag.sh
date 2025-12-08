@@ -19,4 +19,4 @@ python main.py DReaRev \
   --selector_sparsity_weight 0.1 \
   --selector_sparsity_target 0.2 \
   --selector_entropy_weight 0.01 \
-  --load_experiment pretrain-0.ckpt
+  --load_experiment pretrain-rearev-f1.ckpt
