@@ -82,7 +82,7 @@ class ReaRev(BaseModel):
                                                edge_list=kb_adj_mat,
                                                rel_features=rel_features)
         else:
-            local_entity_emb = self.entity_embedding(local_entity)  # batch_size, max_local_entity, word_dim
+            local_entity_emb = self.embedding_drop(self.entity_embedding(local_entity))  # batch_size, max_local_entity, word_dim
             local_entity_emb = self.entity_linear(local_entity_emb)
         
         return local_entity_emb
@@ -93,8 +93,8 @@ class ReaRev(BaseModel):
         Encode relation tokens to vectors.
         """
         if self.rel_texts is None:
-            rel_features = self.relation_embedding.weight
-            rel_features_inv = self.relation_embedding_inv.weight
+            rel_features = self.embedding_drop(self.relation_embedding.weight)
+            rel_features_inv = self.embedding_drop(self.relation_embedding_inv.weight)
             rel_features = self.relation_linear(rel_features)
             rel_features_inv = self.relation_linear(rel_features_inv)
         else:
@@ -121,7 +121,7 @@ class ReaRev(BaseModel):
         entity_dim = self.entity_dim
         self.reasoning = ReasonGNNLayer(args, num_entity, num_relation, entity_dim, self.alg)
         if args['lm'] == 'lstm':
-            self.instruction = LSTMInstruction(args, self.word_embedding, self.num_word)
+            self.instruction = LSTMInstruction(args, self.word_embedding, self.num_word, embedding_drop=self.embedding_drop)
             self.relation_linear = nn.Linear(in_features=entity_dim, out_features=entity_dim)
         else:
             self.instruction = BERTInstruction(args, self.word_embedding, self.num_word, args['lm'])

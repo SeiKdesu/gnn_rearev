@@ -9,12 +9,13 @@ VERY_NEG_NUMBER = -100000000000
 
 class LSTMInstruction(BaseInstruction):
 
-    def __init__(self, args, word_embedding, num_word):
+    def __init__(self, args, word_embedding, num_word, embedding_drop=None):
         super(LSTMInstruction, self).__init__(args)
         self.word2id = get_dict(args['data_folder'],args['word2id'])
 
         self.word_embedding = word_embedding
         self.num_word = num_word
+        self.embedding_drop = embedding_drop if embedding_drop is not None else nn.Dropout(p=0.2)
         self.encoder_def()
         entity_dim = self.entity_dim
         self.cq_linear = nn.Linear(in_features=4 * entity_dim, out_features=entity_dim)
@@ -31,7 +32,7 @@ class LSTMInstruction(BaseInstruction):
 
     def encode_question(self, query_text, store=True):
         batch_size = query_text.size(0)
-        query_word_emb = self.word_embedding(query_text)  # batch_size, max_query_word, word_dim
+        query_word_emb = self.embedding_drop(self.word_embedding(query_text))  # batch_size, max_query_word, word_dim
         query_hidden_emb, (h_n, c_n) = self.node_encoder(self.lstm_drop(query_word_emb),
                                                          self.init_hidden(1, batch_size,
                                                                           self.entity_dim))  # 1, batch_size, entity_dim

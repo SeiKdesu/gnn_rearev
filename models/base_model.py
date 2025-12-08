@@ -39,6 +39,7 @@ class BaseModel(torch.nn.Module):
         #self.share_module_def()
         #self.model_name = args['model_name'].lower()
         self.device = torch.device('cuda' if args['use_cuda'] else 'cpu')
+        self.embedding_drop = nn.Dropout(p=0.2)
        
         print("Entity: {}, Relation: {}, Word: {}".format(num_entity, num_relation, num_word))
 
