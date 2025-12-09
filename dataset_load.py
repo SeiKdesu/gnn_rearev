@@ -485,8 +485,12 @@ class BasicDataLoader(object):
                 head_list, rel_list, tail_list = self.create_kb_adj_mats(sample_id) #kb_adj_mats[sample_id]
             else:
                 (head_list, rel_list, tail_list) = self.kb_adj_mats[sample_id]
+            if self.data_type == 'train':
+                current_fact_dropout = 0.1
+            else:
+                current_fact_dropout = fact_dropout
             num_fact = len(head_list)
-            num_keep_fact = int(np.floor(num_fact * (1 - fact_dropout)))
+            num_keep_fact = int(np.floor(num_fact * (1 - current_fact_dropout)))
             mask_index = np.random.permutation(num_fact)[: num_keep_fact]
 
             real_head_list = head_list[mask_index] + index_bias
