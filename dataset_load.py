@@ -9,6 +9,7 @@ import warnings
 import pickle
 warnings.filterwarnings("ignore")
 from modules.question_encoding.tokenizers import LSTMTokenizer#, BERTTokenizer
+from modules.denoise_subgraph import SubgraphDenoiser
 from transformers import AutoTokenizer
 import time
 
@@ -24,6 +25,7 @@ class BasicDataLoader(object):
     def __init__(self, config, word2id, relation2id, entity2id, tokenize, data_type="train"):
         self.tokenize = tokenize
         self._parse_args(config, word2id, relation2id, entity2id)
+        self._init_denoiser(config)
         self._load_file(config, data_type)
         self._load_data()
         
@@ -50,6 +52,7 @@ class BasicDataLoader(object):
                 if len(line['entities']) == 0:
                     skip_index.add(index)
                     continue
+                line = self._apply_denoise(line)
                 self.data.append(line)
                 self.max_facts = max(self.max_facts, 2 * len(line['subgraph']['tuples']))
                 index += 1
@@ -126,6 +129,22 @@ class BasicDataLoader(object):
                                                                             len(self.relation2id),
                                                                             self.num_kb_relation))
 
+    def _init_denoiser(self, config):
+        self.denoiser = None
+        if config.get('enable_denoise', False):
+            self.denoiser = SubgraphDenoiser(self.relation2id, config)
+
+    def _apply_denoise(self, sample):
+        if self.denoiser is None:
+            return sample
+        try:
+            question = sample.get('question', '')
+            subgraph = sample.get('subgraph', {})
+            topic_entities = sample.get('entities_cid', sample.get('entities', []))
+            sample['subgraph'] = self.denoiser.denoise(question, subgraph, topic_entities)
+        except Exception as exc:
+            warnings.warn("Denoise failed for sample {}: {}".format(sample.get('id', 'N/A'), exc))
+        return sample
     
     def get_quest(self, training=False):
         q_list = []

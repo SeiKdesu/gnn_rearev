@@ -86,8 +86,60 @@ class GraftBasicDataLoader(BasicDataLoader):
             kb_fact_rels[i] = kb_fact_rel
             assert len(val0) == len(val1)
             num_fact = len(val0)
-            num_keep_fact = int(np.floor(num_fact * (1 - fact_dropout)))
-            mask_index = np.random.permutation(num_fact)[ : num_keep_fact]
+            
+            # --- Start of modification ---
+            sample = self.data[sample_id]
+            gt_path_indices = set()
+            if 'path' in sample and self.data_type == 'train' and fact_dropout > 0:
+                # Create a canonical representation of the tuples to find indices of path edges
+                tuple_to_idx = {}
+                for idx, tpl in enumerate(sample['subgraph']['tuples']):
+                    s, r, o = tpl
+                    s_id = s['text'] if isinstance(s, dict) and 'text' in s else s
+                    r_id = r['text'] if isinstance(r, dict) and 'text' in r else r
+                    o_id = o['text'] if isinstance(o, dict) and 'text' in o else o
+                    tuple_to_idx[(s_id, r_id, o_id)] = idx
+
+                for path_triple in sample['path']:
+                    s, r, o = path_triple
+                    s_id = s['text'] if isinstance(s, dict) and 'text' in s else s
+                    r_id = r['text'] if isinstance(r, dict) and 'text' in r else r
+                    o_id = o['text'] if isinstance(o, dict) and 'text' in o else o
+                    
+                    if (s_id, r_id, o_id) in tuple_to_idx:
+                        original_idx = tuple_to_idx[(s_id, r_id, o_id)]
+                        if self.use_inverse_relation:
+                            gt_path_indices.add(2 * original_idx)
+                            gt_path_indices.add(2 * original_idx + 1)
+                        else:
+                            gt_path_indices.add(original_idx)
+
+            if self.data_type == 'train' and fact_dropout > 0:
+                all_indices = np.arange(num_fact)
+                non_gt_indices = np.array([idx for idx in all_indices if idx not in gt_path_indices])
+                
+                num_keep_fact = int(np.floor(num_fact * (1 - fact_dropout)))
+
+                if len(gt_path_indices) >= num_keep_fact:
+                    mask_index = np.array(list(gt_path_indices))[:num_keep_fact] # Truncate if gt path is too long
+                else:
+                    num_non_gt_to_keep = num_keep_fact - len(gt_path_indices)
+                    
+                    if num_non_gt_to_keep > len(non_gt_indices):
+                        num_non_gt_to_keep = len(non_gt_indices)
+                    
+                    # Ensure non_gt_indices is not empty before calling choice
+                    if len(non_gt_indices) > 0 and num_non_gt_to_keep > 0:
+                        keep_non_gt_indices = np.random.choice(non_gt_indices, num_non_gt_to_keep, replace=False)
+                        mask_index = np.concatenate([np.array(list(gt_path_indices)), keep_non_gt_indices])
+                    else:
+                        mask_index = np.array(list(gt_path_indices))
+            else:
+                # Original behavior for eval/test or no dropout
+                num_keep_fact = int(np.floor(num_fact * (1 - fact_dropout)))
+                mask_index = np.random.permutation(num_fact)[: num_keep_fact]
+            # --- End of modification ---
+
             # mat0
             mats0_batch = np.append(mats0_batch, np.full(len(mask_index), i, dtype=int))
             mats0_0 = np.append(mats0_0, mat0_0[mask_index])

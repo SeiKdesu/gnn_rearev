@@ -21,6 +21,20 @@ python main.py ReaRev --entity_dim 50 --num_epoch 200 --batch_size 8 --eval_ever
 
 The result is saved as a `.info` file. In order to use GNN-RAG, please move this file to the corresponding folder in `GNN-RAG/llm/results/gnn/` by renaming it to `test.info`.
 
+## Subgraph Denoising (optional)
+You can enable subgraph denoising during data loading to prune noisy edges:
+```
+python main.py ReaRev --data_folder data/webqsp/ --lm sbert --enable_denoise true --encoder_type tfidf --topM_strict 10 --topK_strict 50 --gamma_strict 0.2 --min_edges 50
+```
+If you have relation descriptions or relation-pair stats, provide them via:
+```
+--relation_desc_path path/to/relation_desc.json --enable_pair_score true --pair_stats_path path/to/pair_stats.json
+```
+Sanity check on one example:
+```
+python scripts/denoise_sanity.py --data_folder data/webqsp/ --split dev --sample_idx 0 --enable_denoise true
+```
+
 ```mermaid
 graph TD
 

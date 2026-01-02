@@ -63,6 +63,25 @@ def add_shared_args(parser):
     parser.add_argument('--test_batch_size', default=20, type=int)
     parser.add_argument('--q_type', default='seq', type=str)
 
+    # subgraph denoising
+    parser.add_argument('--enable_denoise', default=False, type=bool_flag)
+    parser.add_argument('--encoder_type', default='tfidf', type=str)
+    parser.add_argument('--encoder_model_name', default=None, type=str)
+    parser.add_argument('--relation_desc_path', default=None, type=str)
+    parser.add_argument('--topM_strict', default=10, type=int)
+    parser.add_argument('--topK_strict', default=50, type=int)
+    parser.add_argument('--gamma_strict', default=0.2, type=float)
+    parser.add_argument('--topM_loose', default=25, type=int)
+    parser.add_argument('--topK_loose', default=150, type=int)
+    parser.add_argument('--gamma_loose', default=0.05, type=float)
+    parser.add_argument('--alpha', default=1.0, type=float)
+    parser.add_argument('--beta', default=1.0, type=float)
+    parser.add_argument('--gamma', default=0.2, type=float)
+    parser.add_argument('--min_edges', default=50, type=float)
+    parser.add_argument('--enable_pair_score', default=False, type=bool_flag)
+    parser.add_argument('--pair_stats_path', default=None, type=str)
+    parser.add_argument('--ensure_connectivity', default=True, type=bool_flag)
+
 
 
 def add_parse_args(parser):
