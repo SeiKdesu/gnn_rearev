@@ -67,6 +67,41 @@ def f1_and_hits(answers, candidate2prob, id2entity, entity2name, eps=0.5):
             return p, r, f1, hits, em, 3, retrieved, ans
 
 
+def _normalize_entity_id(entity, entity2id):
+    if isinstance(entity, dict):
+        if 'text' in entity:
+            entity = entity['text']
+        elif 'kb_id' in entity:
+            entity = entity['kb_id']
+    if isinstance(entity, str):
+        if entity in entity2id:
+            return entity2id[entity]
+        try:
+            return int(entity)
+        except ValueError:
+            return entity
+    if isinstance(entity, np.integer):
+        return int(entity)
+    return entity
+
+
+def _extract_subgraph_entity_ids(sample, entity2id):
+    subgraph = sample.get("subgraph", {})
+    entities = subgraph.get("entities")
+    entity_ids = set()
+    if entities is not None:
+        for ent in entities:
+            entity_ids.add(_normalize_entity_id(ent, entity2id))
+        return entity_ids
+    for tpl in subgraph.get("tuples", []):
+        if len(tpl) < 3:
+            continue
+        sbj, _, obj = tpl
+        entity_ids.add(_normalize_entity_id(sbj, entity2id))
+        entity_ids.add(_normalize_entity_id(obj, entity2id))
+    return entity_ids
+
+
 class Evaluator:
 
     def __init__(self, args, model, entity2id, relation2id, device):
@@ -145,6 +180,8 @@ class Evaluator:
         id2entity = self.id2entity
         eval_loss, eval_acc, eval_max_acc = [], [], []
         f1s, hits, ems,  precisions, recalls = [], [], [], [], []
+        subgraph_answer_hits = 0
+        subgraph_answerable_total = 0
         valid_data.reset_batches(is_sequential=True)
         num_epoch = math.ceil(valid_data.num_data / test_batch_size)
         if write_info and self.file_write is None:
@@ -153,6 +190,7 @@ class Evaluator:
             self.file_write = open(filename, "w")
         case_ct = {}
         max_local_entity = valid_data.max_local_entity
+        entity2id = valid_data.entity2id
         ignore_prob = (1 - eps) / max_local_entity
         for iteration in tqdm(range(num_epoch)):
             batch = valid_data.get_batch(iteration, test_batch_size, fact_dropout=0.0, test=True)
@@ -183,10 +221,24 @@ class Evaluator:
             batch_answers = answer_list
             batch_candidates = candidate_entities
             pad_ent_id = len(id2entity)
+            sample_ids = valid_data.sample_ids
             #pr_dist2 = pred_dist.copy()
             #for pred_dist in pr_dist2:
             for batch_id in range(batch_size):
+                sample_id = int(sample_ids[batch_id])
+                sample = valid_data.data[sample_id]
+                subgraph_entity_ids = _extract_subgraph_entity_ids(sample, entity2id)
                 answers = batch_answers[batch_id]
+                subgraph_has_answer = False
+                if answers is not None and len(answers) > 0:
+                    for answer in answers:
+                        answer_id = _normalize_entity_id(answer, entity2id)
+                        if answer_id in subgraph_entity_ids:
+                            subgraph_has_answer = True
+                            break
+                    subgraph_answerable_total += 1
+                    if subgraph_has_answer:
+                        subgraph_answer_hits += 1
                 candidates = batch_candidates[batch_id, :].tolist()
                 probs = pred_dist[batch_id, :].tolist()
                 seed_entities = query_entities[batch_id, :].tolist()
@@ -215,6 +267,7 @@ class Evaluator:
                     tp_obj['f1'] = f1
                     tp_obj['hit'] = hit
                     tp_obj['em'] = em
+                    tp_obj['subgraph_has_answer'] = subgraph_has_answer
                     tp_obj['cand'] = retrived
                     self.file_write.write(json.dumps(tp_obj) + "\n")
                 case_ct.setdefault(case, 0)
@@ -232,6 +285,9 @@ class Evaluator:
         print('avg_f1', np.mean(f1s))
         print('avg_precision', np.mean(precisions))
         print('avg_recall', np.mean(recalls))
+        if subgraph_answerable_total > 0:
+            print('subgraph_has_answer_rate', subgraph_answer_hits / subgraph_answerable_total)
+            print('subgraph_has_answer_count', subgraph_answer_hits, subgraph_answerable_total)
         
         print(case_ct)
         if write_info:
