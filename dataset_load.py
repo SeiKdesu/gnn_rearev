@@ -141,10 +141,31 @@ class BasicDataLoader(object):
             question = sample.get('question', '')
             subgraph = sample.get('subgraph', {})
             topic_entities = sample.get('entities_cid', sample.get('entities', []))
-            sample['subgraph'] = self.denoiser.denoise(question, subgraph, topic_entities)
+            answer_entities = self._extract_answer_entities(sample)
+            if answer_entities:
+                topic_entities = list(topic_entities) + answer_entities
+            sample['subgraph'] = self.denoiser.denoise(
+                question, subgraph, topic_entities
+            )
         except Exception as exc:
             warnings.warn("Denoise failed for sample {}: {}".format(sample.get('id', 'N/A'), exc))
         return sample
+
+    @staticmethod
+    def _extract_answer_entities(sample):
+        if 'answers_cid' in sample:
+            return list(sample.get('answers_cid', []))
+        answers = sample.get('answers', [])
+        answer_entities = []
+        for answer in answers:
+            if isinstance(answer, dict):
+                if 'kb_id' in answer:
+                    answer_entities.append(answer['kb_id'])
+                elif 'text' in answer:
+                    answer_entities.append(answer['text'])
+            else:
+                answer_entities.append(answer)
+        return answer_entities
     
     def get_quest(self, training=False):
         q_list = []
