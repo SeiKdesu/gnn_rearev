@@ -22,14 +22,23 @@ def cal_accuracy(pred, answer_dist):
     return num_correct / len(pred), num_answerable / len(pred)
 
 
+def _safe_entity_label(entity_id, id2entity, entity2name):
+    ent = id2entity.get(entity_id)
+    if ent is None:
+        return str(entity_id)
+    if entity2name is None:
+        return ent
+    try:
+        return entity2name[ent]
+    except (KeyError, IndexError, TypeError):
+        return str(ent)
+
+
 def f1_and_hits(answers, candidate2prob, id2entity, entity2name, eps=0.5):
     ans = []
     retrieved = []
     for a in answers:
-        if entity2name is None:
-            ans.append(id2entity[a])
-        else:
-            ans.append(entity2name[id2entity[a]])
+        ans.append(_safe_entity_label(a, id2entity, entity2name))
     correct = 0
     cand_list = sorted(candidate2prob, key=lambda x:x[1], reverse=True)
     if len(cand_list) == 0:
@@ -39,10 +48,7 @@ def f1_and_hits(answers, candidate2prob, id2entity, entity2name, eps=0.5):
     # max_prob = cand_list[0][1]
     tp_prob = 0.0
     for c, prob in cand_list:
-        if entity2name is None:
-            retrieved.append((id2entity[c], prob))
-        else:
-           retrieved.append((entity2name[id2entity[c]], prob))
+        retrieved.append((_safe_entity_label(c, id2entity, entity2name), prob))
         tp_prob += prob
         if c in answers:
             correct += 1
