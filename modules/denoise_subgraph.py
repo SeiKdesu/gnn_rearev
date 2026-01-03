@@ -372,6 +372,56 @@ class SubgraphDenoiser:
                 return ent["kb_id"]
         return ent
 
+    def _tuple_entity_keys(self, tuples: Iterable[Tuple[Any, Any, Any]]) -> List[Any]:
+        keys: List[Any] = []
+        seen = set()
+        for tpl in tuples:
+            if len(tpl) != 3:
+                continue
+            sbj, _, obj = tpl
+            for ent in (sbj, obj):
+                key = self._entity_key(ent)
+                if key in seen:
+                    continue
+                seen.add(key)
+                keys.append(key)
+        return keys
+
+    def _rebuild_entities(
+        self,
+        tuples: List[Tuple[Any, Any, Any]],
+        original_entities: Optional[Iterable[Any]],
+        topic_entities: Optional[Iterable[Any]],
+    ) -> List[Any]:
+        entity_lookup: Dict[Any, Any] = {}
+        if original_entities:
+            for ent in original_entities:
+                key = self._entity_key(ent)
+                if key not in entity_lookup:
+                    entity_lookup[key] = ent
+
+        def select_entity(ent: Any) -> Any:
+            key = self._entity_key(ent)
+            return entity_lookup.get(key, ent)
+
+        rebuilt: List[Any] = []
+        seen = set()
+        for sbj, _, obj in tuples:
+            for ent in (sbj, obj):
+                key = self._entity_key(ent)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rebuilt.append(select_entity(ent))
+        if topic_entities:
+            for ent in topic_entities:
+                key = self._entity_key(ent)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rebuilt.append(select_entity(ent))
+        return rebuilt
+
     def _relation_id(self, rel: Any) -> int:
         rel_key = rel
         if isinstance(rel, dict):
@@ -489,17 +539,22 @@ class SubgraphDenoiser:
             return pruned_edges
         topic_keys = {self._entity_key(ent) for ent in topic_entities}
         pruned_set = {edge.index for edge in pruned_edges}
-        outgoing_by_head: Dict[Any, List[Edge]] = {}
+        incident_by_topic: Dict[Any, List[Edge]] = {}
         for edge in original_edges:
-            outgoing_by_head.setdefault(edge.head, []).append(edge)
+            if edge.head in topic_keys:
+                incident_by_topic.setdefault(edge.head, []).append(edge)
+            if edge.tail in topic_keys and edge.tail != edge.head:
+                incident_by_topic.setdefault(edge.tail, []).append(edge)
 
         for topic in topic_keys:
-            if not outgoing_by_head.get(topic):
+            candidates = incident_by_topic.get(topic)
+            if not candidates:
                 continue
-            has_outgoing = any(edge.head == topic for edge in pruned_edges)
-            if has_outgoing:
+            has_incident = any(
+                edge.head == topic or edge.tail == topic for edge in pruned_edges
+            )
+            if has_incident:
                 continue
-            candidates = outgoing_by_head[topic]
             best_edge = max(candidates, key=lambda e: edge_scores.get(e.index, 0.0))
             if best_edge.index not in pruned_set:
                 pruned_edges.append(best_edge)
@@ -569,5 +624,22 @@ class SubgraphDenoiser:
             kept_edges = strict_edges
 
         new_subgraph = dict(subgraph)
-        new_subgraph["tuples"] = [edge.original for edge in kept_edges]
+        kept_tuples = [edge.original for edge in kept_edges]
+        new_subgraph["tuples"] = kept_tuples
+        original_entities = subgraph.get("entities")
+        new_entities = self._rebuild_entities(kept_tuples, original_entities, topic_entities)
+        new_subgraph["entities"] = new_entities
+        original_entity_count = (
+            len(original_entities)
+            if original_entities is not None
+            else len(self._tuple_entity_keys(tuples))
+        )
+        if len(kept_tuples) != len(tuples) or len(new_entities) != original_entity_count:
+            logger.info(
+                "Denoise subgraph: edges %d -> %d, entities %d -> %d",
+                len(tuples),
+                len(kept_tuples),
+                original_entity_count,
+                len(new_entities),
+            )
         return new_subgraph

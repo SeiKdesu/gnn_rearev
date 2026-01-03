@@ -1,1 +1,1 @@
-WANDB_API_KEY="66a8159cb49efe62675286b7216aecb7360a03a3" python main.py ReaRev --data_folder data/CWQ/ --lm sbert --enable_denoise true --encoder_type tfidf --topM_strict 10 --topK_strict 50 --gamma_strict 0.2 --min_edges 50
+WANDB_API_KEY="66a8159cb49efe62675286b7216aecb7360a03a3" python scripts/denoise_sanity.py --data_folder data/CWQ/ --split dev --sample_idx 0 --enable_denoise true
