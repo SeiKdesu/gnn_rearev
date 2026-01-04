@@ -88,12 +88,12 @@ class BERTInstruction(BaseInstruction):
 
     def encode_question(self, query_text, store=True):
         batch_size = query_text.size(0)
-        
+        attention_mask = (query_text != self.pad_val).long()
         if self.model != 't5':
             
-            query_hidden_emb = self.node_encoder(query_text)[0]  # 1, batch_size, entity_dim
+            query_hidden_emb = self.node_encoder(query_text, attention_mask=attention_mask)[0]  # 1, batch_size, entity_dim
         else:
-            query_hidden_emb = self.node_encoder.encoder(query_text)[0]
+            query_hidden_emb = self.node_encoder.encoder(query_text, attention_mask=attention_mask)[0]
             #print(query_hidden_emb.size())
         
 
