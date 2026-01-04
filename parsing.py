@@ -15,6 +15,19 @@ def add_shared_args(parser):
     parser.add_argument('--data_folder', default='data/webqsp/', type=str)
     parser.add_argument('--max_train', default=200000, type=int)
 
+    # subgraph options
+    parser.add_argument('--subgraph_mode', default='full', type=str, choices=['full', 'oracle_min'])
+    parser.add_argument('--oracle_kb_path', default=None, type=str)
+    parser.add_argument('--oracle_kb_format', default='auto', type=str, choices=['auto', 'adj', 'triples'])
+    parser.add_argument('--oracle_max_hop', default=3, type=int)
+    parser.add_argument('--oracle_fallback', default='extend', type=str, choices=['extend', 'skip'])
+    parser.add_argument('--oracle_fallback_max_hop', default=4, type=int)
+    parser.add_argument('--oracle_answer_strategy', default='random', type=str, choices=['random', 'union'])
+    parser.add_argument('--oracle_pad_neighbors', default=0, type=int)
+    parser.add_argument('--oracle_pad_max_degree', default=200, type=int)
+    parser.add_argument('--oracle_pad_max_facts', default=0, type=int)
+    parser.add_argument('--oracle_cache_size', default=0, type=int)
+
     # embeddings
     parser.add_argument('--word2id', default='vocab.txt', type=str)
     parser.add_argument('--relation2id', default='relations.txt', type=str)

@@ -234,10 +234,12 @@ class Evaluator:
         print('avg_recall', np.mean(recalls))
         
         print(case_ct)
+        print("metrics_table")
+        print("F1\tHits@1\tEM")
+        print("{:.4f}\t{:.4f}\t{:.4f}".format(np.mean(f1s), np.mean(hits), np.mean(ems)))
         if write_info:
             self.file_write.close()
             self.file_write = None
         return np.mean(f1s), np.mean(hits), np.mean(ems)
-
 
 

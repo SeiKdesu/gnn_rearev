@@ -13,6 +13,7 @@ from transformers import AutoTokenizer
 import time
 
 import os
+from oracle_subgraph import OracleSubgraphBuilder, get_kb_graph
 
 
 class BasicDataLoader(object):
@@ -41,21 +42,43 @@ class BasicDataLoader(object):
         self.data = []
         skip_index = set()
         index = 0
+        if self.subgraph_mode == 'oracle_min':
+            self._init_oracle_stats()
 
         with open(data_file) as f_in:
             for line in tqdm(f_in):
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
                 line = json.loads(line)
-                
-                if len(line['entities']) == 0:
+
+                topic_entities = self._get_topic_entities(line)
+                if len(topic_entities) == 0:
                     skip_index.add(index)
                     continue
+                if self.subgraph_mode == 'oracle_min':
+                    self.oracle_stats["total"] += 1
+                    answers_raw = self._get_answer_entities(line)
+                    subgraph, meta = self.oracle_builder.build(topic_entities, answers_raw)
+                    self.oracle_stats["answer_total"] += meta["answer_total"]
+                    self.oracle_stats["answer_covered"] += meta["answer_covered"]
+                    if meta["answer_any"]:
+                        self.oracle_stats["answer_any"] += 1
+                    if not meta["found"]:
+                        self.oracle_stats["not_found"] += 1
+                        continue
+                    self.oracle_stats["found"] += 1
+                    if meta["path_len"] is not None:
+                        self.oracle_stats["path_len"][meta["path_len"]] += 1
+                    line['subgraph'] = subgraph
+                    self.oracle_stats["entities"].append(len(subgraph.get('entities', [])))
+                    self.oracle_stats["facts"].append(len(subgraph.get('tuples', [])))
                 self.data.append(line)
                 self.max_facts = max(self.max_facts, 2 * len(line['subgraph']['tuples']))
                 index += 1
 
         print("skip", skip_index)
         print('max_facts: ', self.max_facts)
+        if self.subgraph_mode == 'oracle_min':
+            self._log_oracle_stats()
         self.num_data = len(self.data)
         self.batches = np.arange(self.num_data)
 
@@ -116,6 +139,27 @@ class BasicDataLoader(object):
         self.id2entity = {i: entity for entity, i in entity2id.items()}
         self.q_type = config['q_type']
 
+        self.subgraph_mode = config.get('subgraph_mode', 'full')
+        self.oracle_builder = None
+        if self.subgraph_mode == 'oracle_min':
+            kb_path = config.get('oracle_kb_path')
+            if not kb_path:
+                raise ValueError("oracle_kb_path must be provided for oracle_min subgraph mode.")
+            kb_format = config.get('oracle_kb_format', 'auto')
+            kb_graph = get_kb_graph(kb_path, kb_format, entity2id, relation2id)
+            self.oracle_builder = OracleSubgraphBuilder(
+                kb_graph,
+                max_hop=config.get('oracle_max_hop', 3),
+                fallback_mode=config.get('oracle_fallback', 'extend'),
+                fallback_max_hop=config.get('oracle_fallback_max_hop', 4),
+                answer_strategy=config.get('oracle_answer_strategy', 'random'),
+                pad_neighbors=config.get('oracle_pad_neighbors', 0),
+                pad_max_degree=config.get('oracle_pad_max_degree', 0),
+                pad_max_facts=config.get('oracle_pad_max_facts', 0),
+                cache_size=config.get('oracle_cache_size', 0),
+                seed=config.get('seed', 0),
+            )
+
         if self.use_inverse_relation:
             self.num_kb_relation = 2 * len(relation2id)
         else:
@@ -125,6 +169,73 @@ class BasicDataLoader(object):
         print("Entity: {}, Relation in KB: {}, Relation in use: {} ".format(len(entity2id),
                                                                             len(self.relation2id),
                                                                             self.num_kb_relation))
+
+    def _get_topic_entities(self, sample):
+        key_ent = 'entities_cid' if 'entities_cid' in sample else 'entities'
+        entities = sample.get(key_ent, [])
+        cleaned = []
+        for ent in entities:
+            if isinstance(ent, dict) and 'text' in ent:
+                cleaned.append(ent['text'])
+            else:
+                cleaned.append(ent)
+        return cleaned
+
+    def _get_answer_entities(self, sample):
+        if 'answers_cid' in sample:
+            return sample.get('answers_cid', [])
+        answers = []
+        for answer in sample.get('answers', []):
+            if isinstance(answer, dict) and 'kb_id' in answer:
+                key = 'text' if isinstance(answer['kb_id'], int) else 'kb_id'
+                answers.append(answer.get(key, answer.get('kb_id')))
+            else:
+                answers.append(answer)
+        return answers
+
+    def _init_oracle_stats(self):
+        self.oracle_stats = {
+            "total": 0,
+            "found": 0,
+            "not_found": 0,
+            "entities": [],
+            "facts": [],
+            "path_len": Counter(),
+            "answer_total": 0,
+            "answer_covered": 0,
+            "answer_any": 0,
+        }
+
+    def _log_oracle_stats(self):
+        stats = self.oracle_stats
+        total = stats["total"]
+        if total == 0:
+            return
+        found = stats["found"]
+        not_found = stats["not_found"]
+        ent_counts = np.array(stats["entities"], dtype=float) if stats["entities"] else np.array([])
+        fact_counts = np.array(stats["facts"], dtype=float) if stats["facts"] else np.array([])
+        avg_ent = float(np.mean(ent_counts)) if ent_counts.size else 0.0
+        avg_fact = float(np.mean(fact_counts)) if fact_counts.size else 0.0
+        p90_ent = float(np.percentile(ent_counts, 90)) if ent_counts.size else 0.0
+        p99_ent = float(np.percentile(ent_counts, 99)) if ent_counts.size else 0.0
+        p90_fact = float(np.percentile(fact_counts, 90)) if fact_counts.size else 0.0
+        p99_fact = float(np.percentile(fact_counts, 99)) if fact_counts.size else 0.0
+        path_len_counts = stats["path_len"]
+        path_dist = {k: path_len_counts.get(k, 0) for k in [1, 2, 3, 4]}
+        if path_len_counts.get(0, 0) > 0:
+            path_dist[0] = path_len_counts.get(0, 0)
+        ans_total = stats["answer_total"]
+        ans_covered = stats["answer_covered"]
+        ans_any = stats["answer_any"]
+        coverage = ans_covered / ans_total if ans_total > 0 else 0.0
+        coverage_any = ans_any / total if total > 0 else 0.0
+        print("oracle_min_subgraph stats [{}]".format(self.data_type))
+        print("  found: {} / {} (not_found_rate {:.4f})".format(found, total, not_found / total))
+        print("  entities avg {:.2f} p90 {:.2f} p99 {:.2f}".format(avg_ent, p90_ent, p99_ent))
+        print("  facts    avg {:.2f} p90 {:.2f} p99 {:.2f}".format(avg_fact, p90_fact, p99_fact))
+        print("  path_len dist {}".format(path_dist))
+        print("  answer_coverage {:.4f} (any {:.4f})".format(coverage, coverage_any))
 
     
     def get_quest(self, training=False):
