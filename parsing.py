@@ -19,6 +19,7 @@ def add_shared_args(parser):
     parser.add_argument('--subgraph_mode', default='full', type=str, choices=['full', 'oracle_min'])
     parser.add_argument('--oracle_kb_path', default=None, type=str)
     parser.add_argument('--oracle_kb_format', default='auto', type=str, choices=['auto', 'adj', 'triples'])
+    parser.add_argument('--oracle_graph_source', default='auto', type=str, choices=['auto', 'kb', 'local'])
     parser.add_argument('--oracle_max_hop', default=3, type=int)
     parser.add_argument('--oracle_fallback', default='extend', type=str, choices=['extend', 'skip'])
     parser.add_argument('--oracle_fallback_max_hop', default=4, type=int)

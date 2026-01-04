@@ -13,7 +13,7 @@ from transformers import AutoTokenizer
 import time
 
 import os
-from oracle_subgraph import OracleSubgraphBuilder, get_kb_graph
+from oracle_subgraph import OracleSubgraphBuilder, get_kb_graph, LocalGraph
 
 
 class BasicDataLoader(object):
@@ -57,7 +57,12 @@ class BasicDataLoader(object):
                 if self.subgraph_mode == 'oracle_min':
                     self.oracle_stats["total"] += 1
                     answers_raw = self._get_answer_entities(line)
-                    subgraph, meta = self.oracle_builder.build(topic_entities, answers_raw)
+                    if self.oracle_graph_source == 'kb':
+                        subgraph, meta = self.oracle_builder.build(topic_entities, answers_raw)
+                    else:
+                        local_graph = LocalGraph(line['subgraph']['tuples'], self.entity2id, self.relation2id)
+                        local_builder = OracleSubgraphBuilder(local_graph, **self.oracle_builder_cfg)
+                        subgraph, meta = local_builder.build(topic_entities, answers_raw)
                     self.oracle_stats["answer_total"] += meta["answer_total"]
                     self.oracle_stats["answer_covered"] += meta["answer_covered"]
                     if meta["answer_any"]:
@@ -140,25 +145,30 @@ class BasicDataLoader(object):
         self.q_type = config['q_type']
 
         self.subgraph_mode = config.get('subgraph_mode', 'full')
+        self.oracle_graph_source = config.get('oracle_graph_source', 'auto')
+        if self.oracle_graph_source == 'auto':
+            self.oracle_graph_source = 'kb' if config.get('oracle_kb_path') else 'local'
         self.oracle_builder = None
+        self.oracle_builder_cfg = {}
         if self.subgraph_mode == 'oracle_min':
-            kb_path = config.get('oracle_kb_path')
-            if not kb_path:
-                raise ValueError("oracle_kb_path must be provided for oracle_min subgraph mode.")
-            kb_format = config.get('oracle_kb_format', 'auto')
-            kb_graph = get_kb_graph(kb_path, kb_format, entity2id, relation2id)
-            self.oracle_builder = OracleSubgraphBuilder(
-                kb_graph,
-                max_hop=config.get('oracle_max_hop', 3),
-                fallback_mode=config.get('oracle_fallback', 'extend'),
-                fallback_max_hop=config.get('oracle_fallback_max_hop', 4),
-                answer_strategy=config.get('oracle_answer_strategy', 'random'),
-                pad_neighbors=config.get('oracle_pad_neighbors', 0),
-                pad_max_degree=config.get('oracle_pad_max_degree', 0),
-                pad_max_facts=config.get('oracle_pad_max_facts', 0),
-                cache_size=config.get('oracle_cache_size', 0),
-                seed=config.get('seed', 0),
-            )
+            self.oracle_builder_cfg = {
+                "max_hop": config.get('oracle_max_hop', 3),
+                "fallback_mode": config.get('oracle_fallback', 'extend'),
+                "fallback_max_hop": config.get('oracle_fallback_max_hop', 4),
+                "answer_strategy": config.get('oracle_answer_strategy', 'random'),
+                "pad_neighbors": config.get('oracle_pad_neighbors', 0),
+                "pad_max_degree": config.get('oracle_pad_max_degree', 0),
+                "pad_max_facts": config.get('oracle_pad_max_facts', 0),
+                "cache_size": config.get('oracle_cache_size', 0),
+                "seed": config.get('seed', 0),
+            }
+            if self.oracle_graph_source == 'kb':
+                kb_path = config.get('oracle_kb_path')
+                if not kb_path:
+                    raise ValueError("oracle_kb_path must be provided when oracle_graph_source=kb.")
+                kb_format = config.get('oracle_kb_format', 'auto')
+                kb_graph = get_kb_graph(kb_path, kb_format, entity2id, relation2id)
+                self.oracle_builder = OracleSubgraphBuilder(kb_graph, **self.oracle_builder_cfg)
 
         if self.use_inverse_relation:
             self.num_kb_relation = 2 * len(relation2id)

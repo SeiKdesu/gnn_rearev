@@ -122,6 +122,56 @@ class KBGraph:
         return self.adj.get(head_id, [])
 
 
+class LocalGraph:
+    def __init__(self, tuples, entity2id=None, relation2id=None):
+        self.entity2id = entity2id or {}
+        self.relation2id = relation2id or {}
+        self.adj = {}
+        for tpl in tuples:
+            if len(tpl) < 3:
+                continue
+            head_id = self._to_entity_id(tpl[0])
+            rel_id = self._to_rel_id(tpl[1])
+            tail_id = self._to_entity_id(tpl[2])
+            if head_id is None or rel_id is None or tail_id is None:
+                continue
+            self.adj.setdefault(head_id, []).append((rel_id, tail_id))
+
+    def _to_entity_id(self, ent):
+        if ent is None:
+            return None
+        if isinstance(ent, dict) and "text" in ent:
+            ent = ent["text"]
+        if isinstance(ent, int):
+            return ent
+        if ent in self.entity2id:
+            return self.entity2id[ent]
+        try:
+            return int(ent)
+        except (TypeError, ValueError):
+            return None
+
+    def _to_rel_id(self, rel):
+        if rel is None:
+            return None
+        if isinstance(rel, dict) and "text" in rel:
+            rel = rel["text"]
+        if isinstance(rel, int):
+            return rel
+        if rel in self.relation2id:
+            return self.relation2id[rel]
+        try:
+            return int(rel)
+        except (TypeError, ValueError):
+            return None
+
+    def to_entity_id(self, ent):
+        return self._to_entity_id(ent)
+
+    def get_neighbors(self, head_id):
+        return self.adj.get(head_id, [])
+
+
 def get_kb_graph(kb_path, kb_format, entity2id, relation2id):
     key = (kb_path, kb_format, len(entity2id), len(relation2id))
     if key in _KB_CACHE:
