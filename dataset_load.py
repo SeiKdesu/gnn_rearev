@@ -141,9 +141,10 @@ class BasicDataLoader(object):
             question = sample.get('question', '')
             subgraph = sample.get('subgraph', {})
             topic_entities = sample.get('entities_cid', sample.get('entities', []))
-            answer_entities = self._extract_answer_entities(sample)
-            if answer_entities:
-                topic_entities = list(topic_entities) + answer_entities
+            if self.data_type == "train":
+                answer_entities = self._extract_answer_entities(sample)
+                if answer_entities:
+                    topic_entities = list(topic_entities) + answer_entities
             sample['subgraph'] = self.denoiser.denoise(
                 question, subgraph, topic_entities
             )
