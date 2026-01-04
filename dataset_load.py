@@ -43,6 +43,9 @@ class BasicDataLoader(object):
         self.data = []
         skip_index = set()
         index = 0
+        denoise_entity_total = 0
+        denoise_answer_hit = 0
+        denoise_sample_count = 0
 
         with open(data_file) as f_in:
             for line in tqdm(f_in):
@@ -53,12 +56,23 @@ class BasicDataLoader(object):
                     skip_index.add(index)
                     continue
                 line = self._apply_denoise(line)
+                if self.denoiser is not None:
+                    denoise_sample_count += 1
+                    denoise_entity_total += self._count_subgraph_entities(line.get('subgraph', {}))
+                    answers = self._extract_answer_entities(line)
+                    if self._subgraph_has_answer(line.get('subgraph', {}), answers):
+                        denoise_answer_hit += 1
                 self.data.append(line)
                 self.max_facts = max(self.max_facts, 2 * len(line['subgraph']['tuples']))
                 index += 1
 
         print("skip", skip_index)
         print('max_facts: ', self.max_facts)
+        if self.denoiser is not None and denoise_sample_count:
+            avg_entities = denoise_entity_total / denoise_sample_count
+            coverage = denoise_answer_hit / denoise_sample_count
+            print("Denoised subgraph avg entities: {:.2f}".format(avg_entities))
+            print("Denoised subgraph answer coverage: {:.2f}%".format(coverage * 100.0))
         self.num_data = len(self.data)
         self.batches = np.arange(self.num_data)
 
@@ -167,6 +181,37 @@ class BasicDataLoader(object):
             else:
                 answer_entities.append(answer)
         return answer_entities
+
+    @staticmethod
+    def _entity_key(ent):
+        if isinstance(ent, dict):
+            if 'text' in ent:
+                return ent['text']
+            if 'kb_id' in ent:
+                return ent['kb_id']
+        return ent
+
+    def _tuple_entity_keys(self, tuples):
+        keys = set()
+        for sbj, _, obj in tuples:
+            keys.add(self._entity_key(sbj))
+            keys.add(self._entity_key(obj))
+        return keys
+
+    def _count_subgraph_entities(self, subgraph):
+        entities = subgraph.get('entities')
+        if entities is not None:
+            return len(entities)
+        return len(self._tuple_entity_keys(subgraph.get('tuples', [])))
+
+    def _subgraph_has_answer(self, subgraph, answers):
+        if not answers:
+            return False
+        answer_keys = {self._entity_key(ans) for ans in answers}
+        if not answer_keys:
+            return False
+        tuple_keys = self._tuple_entity_keys(subgraph.get('tuples', []))
+        return bool(answer_keys & tuple_keys)
     
     def get_quest(self, training=False):
         q_list = []
