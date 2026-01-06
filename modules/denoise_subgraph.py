@@ -634,8 +634,8 @@ class SubgraphDenoiser:
             if original_entities is not None
             else len(self._tuple_entity_keys(tuples))
         )
-        logger.debug(
-            "Denoise subgraph: edges %d -> %d, entities %d -> %d",
+        print(
+            f"Denoise subgraph: edges {len(tuple)} -> {len(kept_tuples)}, entities {original_entity_count} -> {len(new_entities)}",
             len(tuples),
             len(kept_tuples),
             original_entity_count,

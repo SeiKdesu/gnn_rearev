@@ -145,8 +145,8 @@ class BasicDataLoader(object):
 
     def _init_denoiser(self, config):
         self.denoiser = None
-        if config.get('enable_denoise', False):
-            self.denoiser = SubgraphDenoiser(self.relation2id, config)
+        # if config.get('enable_denoise', False):
+        self.denoiser = SubgraphDenoiser(self.relation2id, config)
 
     def _apply_denoise(self, sample):
         if self.denoiser is None:
@@ -155,10 +155,6 @@ class BasicDataLoader(object):
             question = sample.get('question', '')
             subgraph = sample.get('subgraph', {})
             topic_entities = sample.get('entities_cid', sample.get('entities', []))
-            if self.data_type == "train":
-                answer_entities = self._extract_answer_entities(sample)
-                if answer_entities:
-                    topic_entities = list(topic_entities) + answer_entities
             sample['subgraph'] = self.denoiser.denoise(
                 question, subgraph, topic_entities
             )
