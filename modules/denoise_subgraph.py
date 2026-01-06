@@ -593,8 +593,8 @@ class SubgraphDenoiser:
         subgraph: Dict[str, Any],
         topic_entities: Optional[Iterable[Any]] = None,
     ) -> Dict[str, Any]:
-        if not self.config.enable:
-            return subgraph
+        # if not self.config.enable:
+        #     return subgraph
         tuples = subgraph.get("tuples", [])
         if not tuples:
             return subgraph
@@ -634,11 +634,11 @@ class SubgraphDenoiser:
             if original_entities is not None
             else len(self._tuple_entity_keys(tuples))
         )
-        print(
-            f"Denoise subgraph: edges {len(tuple)} -> {len(kept_tuples)}, entities {original_entity_count} -> {len(new_entities)}",
-            len(tuples),
-            len(kept_tuples),
-            original_entity_count,
-            len(new_entities),
-        )
+        # print(
+        #     f"Denoise subgraph: edges {len(tuple)} -> {len(kept_tuples)}, entities {original_entity_count} -> {len(new_entities)}",
+        #     len(tuples),
+        #     len(kept_tuples),
+        #     original_entity_count,
+        #     len(new_entities),
+        # )
         return new_subgraph
