@@ -562,6 +562,38 @@ class SubgraphDenoiser:
         pruned_edges.sort(key=lambda e: e.index)
         return pruned_edges
 
+    def _filter_seed_connected(
+        self,
+        pruned_edges: List[Edge],
+        topic_entities: Optional[Iterable[Any]],
+    ) -> List[Edge]:
+        if not pruned_edges or not topic_entities:
+            return pruned_edges
+        topic_keys = {self._entity_key(ent) for ent in topic_entities}
+        adj: Dict[Any, set] = {}
+        for edge in pruned_edges:
+            adj.setdefault(edge.head, set()).add(edge.tail)
+            adj.setdefault(edge.tail, set()).add(edge.head)
+        seed_keys = [key for key in topic_keys if key in adj]
+        if not seed_keys:
+            return []
+        reachable = set(seed_keys)
+        stack = list(seed_keys)
+        while stack:
+            node = stack.pop()
+            for nbr in adj.get(node, ()):
+                if nbr in reachable:
+                    continue
+                reachable.add(nbr)
+                stack.append(nbr)
+        filtered = [
+            edge
+            for edge in pruned_edges
+            if edge.head in reachable and edge.tail in reachable
+        ]
+        filtered.sort(key=lambda e: e.index)
+        return filtered
+
     def _min_edges_threshold(self, num_edges: int) -> int:
         if self.config.min_edges <= 0:
             return 0
@@ -585,6 +617,7 @@ class SubgraphDenoiser:
             pruned_edges = self._ensure_topic_coverage(
                 pruned_edges, edges, topic_entities, edge_scores
             )
+            pruned_edges = self._filter_seed_connected(pruned_edges, topic_entities)
         return pruned_edges
 
     def denoise(
