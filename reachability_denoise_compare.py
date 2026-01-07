@@ -64,12 +64,16 @@ def entity_key(ent):
 
 
 def extract_topics(sample: Dict[str, Any]) -> List[Any]:
-    if "entities_cid" in sample and sample["entities_cid"] is not None:
-        return [entity_key(e) for e in sample.get("entities_cid", [])]
+    entities_cid = sample.get("entities_cid") or []
+    if entities_cid:
+        return [entity_key(e) for e in entities_cid]
     return [entity_key(e) for e in sample.get("entities", [])]
 
 
 def extract_answers(sample):
+    answers_cid = sample.get("answers_cid") or []
+    if answers_cid:
+        return [entity_key(a) for a in answers_cid]
     out = []
     for a in sample.get("answers", []):
         out.append(entity_key(a))  # dictなら kb_id を拾う
@@ -267,6 +271,9 @@ def main():
         "drop_reach": 0,
         "off_seed_before": 0,
         "off_seed_after": 0,
+        "ans_conn_before": 0,
+        "ans_conn_after": 0,
+        "drop_ans_conn": 0,
     }
     seed_checked = 0
 
@@ -307,8 +314,9 @@ def main():
         if topics:
             seed_checked += 1
             off_seed_before = bool(endpoints_before - reachable_before)
+        ans_conn_before = bool(answers & reachable_before)
 
-        sub_after = denoiser.denoise(q, sub_before, topics)
+        sub_after = denoiser.denoise(q, sub_before, topics_raw)
 
         endpoints_after = tuple_endpoints(sub_after, mid2id)
         ans_in_after = bool(answers & endpoints_after)
@@ -321,6 +329,7 @@ def main():
         off_seed_after = False
         if topics:
             off_seed_after = bool(endpoints_after - reachable_after)
+        ans_conn_after = bool(answers & reachable_after)
 
         stats["ans_in_before"] += int(ans_in_before)
         stats["ans_in_after"] += int(ans_in_after)
@@ -331,6 +340,9 @@ def main():
         stats["drop_reach"] += int(reach_before and not reach_after)
         stats["off_seed_before"] += int(off_seed_before)
         stats["off_seed_after"] += int(off_seed_after)
+        stats["ans_conn_before"] += int(ans_conn_before)
+        stats["ans_conn_after"] += int(ans_conn_after)
+        stats["drop_ans_conn"] += int(ans_conn_before and not ans_conn_after)
 
         sum_ent_before += count_entities(sub_before, mid2id)
         sum_ent_after += count_entities(sub_after, mid2id)
@@ -370,6 +382,11 @@ def main():
     if seed_checked:
         print(f"off_seed before: {stats['off_seed_before']} ({rate(stats['off_seed_before'], seed_checked):.4f})")
         print(f"off_seed after : {stats['off_seed_after']} ({rate(stats['off_seed_after'], seed_checked):.4f})")
+
+    print("\n-- Answer reachable from topics (undirected, no hop limit) --")
+    print(f"before: {stats['ans_conn_before']} ({rate(stats['ans_conn_before'], total):.4f})")
+    print(f"after : {stats['ans_conn_after']} ({rate(stats['ans_conn_after'], total):.4f})")
+    print(f"drop_ans_conn (True->False): {stats['drop_ans_conn']} ({rate(stats['drop_ans_conn'], total):.4f})")
 
     print("\n-- Size (avg) --")
     print(f"avg_edges    before: {sum_edge_before/total:.2f}  after: {sum_edge_after/total:.2f}")

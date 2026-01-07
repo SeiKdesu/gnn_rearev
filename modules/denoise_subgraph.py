@@ -366,11 +366,22 @@ class SubgraphDenoiser:
 
     def _entity_key(self, ent: Any) -> Any:
         if isinstance(ent, dict):
-            if "text" in ent:
-                return ent["text"]
-            if "kb_id" in ent:
-                return ent["kb_id"]
-        return ent
+            if "kb_id" in ent and ent["kb_id"] is not None:
+                return self._normalize_entity_key(ent["kb_id"])
+            if "text" in ent and ent["text"] is not None:
+                return self._normalize_entity_key(ent["text"])
+        return self._normalize_entity_key(ent)
+
+    @staticmethod
+    def _normalize_entity_key(key: Any) -> Any:
+        if not isinstance(key, str):
+            return key
+        key = key.strip()
+        if key.startswith("/m/"):
+            return "m." + key[3:]
+        if key.startswith("/g/"):
+            return "g." + key[3:]
+        return key
 
     def _tuple_entity_keys(self, tuples: Iterable[Tuple[Any, Any, Any]]) -> List[Any]:
         keys: List[Any] = []

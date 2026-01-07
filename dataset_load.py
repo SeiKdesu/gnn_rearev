@@ -154,7 +154,7 @@ class BasicDataLoader(object):
         try:
             question = sample.get('question', '')
             subgraph = sample.get('subgraph', {})
-            topic_entities = sample.get('entities_cid', sample.get('entities', []))
+            topic_entities = sample.get('entities_cid') or sample.get('entities') or []
             sample['subgraph'] = self.denoiser.denoise(
                 question, subgraph, topic_entities
             )
