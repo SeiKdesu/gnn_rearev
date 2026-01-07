@@ -16,7 +16,7 @@
 
 # python main.py ReaRev --entity_dim 100 --num_epoch 20 --batch_size 4 --eval_every 2 --lm relbert --num_iter 2 --num_ins 3   --name cwq --experiment_name dim_100 --data_folder data/CWQ/ --warmup_epoch 80
 
-WANDB_API_KEY="66a8159cb49efe62675286b7216aecb7360a03a3" python main.py ReaRev --entity_dim 50 --num_epoch 100 --batch_size 8 --eval_every 2  --lm relbert --num_iter 2 --num_ins 3   --name cwq --experiment_name original_freebaseQA_dim_50 --data_folder data/SimpleQA/ --warmup_epoch 80
+WANDB_API_KEY="66a8159cb49efe62675286b7216aecb7360a03a3" python main.py ReaRev --entity_dim 50 --num_epoch 100 --batch_size 8 --eval_every 2  --lm sbert --num_iter 2 --num_ins 3   --name cwq --experiment_name cross_attn_cwq --data_folder data/CWQ/ --warmup_epoch 80 
 
 # python main.py ReaRev --entity_dim 150 --num_epoch 20 --batch_size 6 --eval_every 2 --lm relbert --num_iter 2 --num_ins 3   --name cwq --experiment_name dim_150 --data_folder data/CWQ/ --warmup_epoch 80
 
