@@ -1,3 +1,4 @@
+import math
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -22,26 +23,28 @@ class QueryReform(nn.Module):
         # self.q_encoder = AttnEncoder(h_dim)
         self.fusion = Fusion(h_dim)
         self.q_ent_attn = nn.Linear(h_dim, h_dim)
+        self.k_ent_attn = nn.Linear(h_dim, h_dim)
+        self.v_ent_attn = nn.Linear(h_dim, h_dim)
+        self.scale = 1.0 / math.sqrt(h_dim)
 
     def forward(self, q_node, ent_emb, seed_info, ent_mask):
         '''
-        q: (B,q_len,h_dim)
-        q_mask: (B,q_len)
-        q_ent_span: (B,q_len)
-        ent_emb: (B,C,h_dim)
+        q_node: (B, h_dim)
+        ent_emb: (B, C, h_dim)
         seed_info: (B, C)
         ent_mask: (B, C)
         '''
         # q_node = self.q_encoder(q, q_mask)
-        q_ent_attn = (self.q_ent_attn(q_node).unsqueeze(1) * ent_emb).sum(2, keepdim=True)
-        q_ent_attn = F.softmax(q_ent_attn - (1 - ent_mask.unsqueeze(2)) * 1e8, dim=1)
-        attn_retrieve = (q_ent_attn * ent_emb).sum(1)
+        ent_mask = ent_mask.float()
+        q_proj = self.q_ent_attn(q_node).unsqueeze(1)
+        k_proj = self.k_ent_attn(ent_emb)
+        v_proj = self.v_ent_attn(ent_emb)
+        attn_scores = torch.bmm(q_proj, k_proj.transpose(1, 2)) * self.scale
+        attn_scores = attn_scores - (1 - ent_mask.unsqueeze(1)) * 1e8
+        attn_weights = F.softmax(attn_scores, dim=2)
+        attn_retrieve = torch.bmm(attn_weights, v_proj).squeeze(1)
 
-        seed_retrieve = torch.bmm(seed_info.unsqueeze(1), ent_emb).squeeze(1) # (B, 1, h_dim)
-        # how to calculate the gate
-
-        #return  self.fusion(q_node, attn_retrieve)
-        return  self.fusion(q_node, seed_retrieve)
+        return self.fusion(q_node, attn_retrieve)
 
 class AttnEncoder(nn.Module):
     """docstring for ClassName"""
