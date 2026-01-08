@@ -224,6 +224,10 @@ def main():
     ap.add_argument("--pair_stats_path", type=str, default=None)
     ap.add_argument("--relation_desc_path", type=str, default=None)
     ap.add_argument("--encoder_model_name", type=str, default=None)
+    ap.add_argument("--denoise_sim_threshold", type=float, default=0.2)
+    ap.add_argument("--denoise_sim_threshold_min", type=float, default=-1.0)
+    ap.add_argument("--denoise_sim_threshold_step", type=float, default=0.05)
+    ap.add_argument("--denoise_max_hops", type=int, default=4)
     ap.add_argument("--entities", required=True, help="entities.txt (one MID per line; line index == entity id)")
 
 
@@ -257,6 +261,10 @@ def main():
         "pair_stats_path": args.pair_stats_path,
         "relation_desc_path": args.relation_desc_path,
         "encoder_model_name": args.encoder_model_name,
+        "denoise_sim_threshold": args.denoise_sim_threshold,
+        "denoise_sim_threshold_min": args.denoise_sim_threshold_min,
+        "denoise_sim_threshold_step": args.denoise_sim_threshold_step,
+        "denoise_max_hops": args.denoise_max_hops,
     }
 
     denoiser = SubgraphDenoiser(relation2id, denoise_cfg)
@@ -316,7 +324,9 @@ def main():
             off_seed_before = bool(endpoints_before - reachable_before)
         ans_conn_before = bool(answers & reachable_before)
 
-        sub_after = denoiser.denoise(q, sub_before, topics_raw)
+        sub_after = denoiser.denoise(
+            q, sub_before, topics_raw, answer_entities=answers_raw
+        )
 
         endpoints_after = tuple_endpoints(sub_after, mid2id)
         ans_in_after = bool(answers & endpoints_after)

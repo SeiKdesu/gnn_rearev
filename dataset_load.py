@@ -155,8 +155,9 @@ class BasicDataLoader(object):
             question = sample.get('question', '')
             subgraph = sample.get('subgraph', {})
             topic_entities = sample.get('entities_cid') or sample.get('entities') or []
+            answer_entities = sample.get('answers_cid') or sample.get('answers') or []
             sample['subgraph'] = self.denoiser.denoise(
-                question, subgraph, topic_entities
+                question, subgraph, topic_entities, answer_entities=answer_entities
             )
         except Exception as exc:
             warnings.warn("Denoise failed for sample {}: {}".format(sample.get('id', 'N/A'), exc))

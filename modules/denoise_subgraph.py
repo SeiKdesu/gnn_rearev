@@ -50,6 +50,10 @@ class DenoiseConfig:
     enable_pair_score: bool
     pair_stats_path: Optional[str]
     ensure_connectivity: bool
+    sim_threshold: float
+    sim_threshold_min: float
+    sim_threshold_step: float
+    max_hops: int
     encoder_model_name: Optional[str] = None
 
 
@@ -172,6 +176,16 @@ def build_denoise_config(config: Dict[str, Any]) -> DenoiseConfig:
     pair_stats_path = config.get("pair_stats_path")
     ensure_connectivity = bool(config.get("ensure_connectivity", True))
     encoder_model_name = config.get("encoder_model_name")
+    sim_threshold = float(
+        config.get("denoise_sim_threshold", config.get("sim_threshold", 0.2))
+    )
+    sim_threshold_min = float(
+        config.get("denoise_sim_threshold_min", config.get("sim_threshold_min", -1.0))
+    )
+    sim_threshold_step = float(
+        config.get("denoise_sim_threshold_step", config.get("sim_threshold_step", 0.05))
+    )
+    max_hops = int(config.get("denoise_max_hops", config.get("max_hops", 4)))
     return DenoiseConfig(
         enable=enable,
         encoder_type=encoder_type,
@@ -184,6 +198,10 @@ def build_denoise_config(config: Dict[str, Any]) -> DenoiseConfig:
         enable_pair_score=enable_pair_score,
         pair_stats_path=pair_stats_path,
         ensure_connectivity=ensure_connectivity,
+        sim_threshold=sim_threshold,
+        sim_threshold_min=sim_threshold_min,
+        sim_threshold_step=sim_threshold_step,
+        max_hops=max_hops,
         encoder_model_name=encoder_model_name,
     )
 
@@ -325,8 +343,9 @@ def build_local_pair_stats(edges: Iterable[Edge]) -> PairStats:
 
 class SubgraphDenoiser:
     """
-    Denoise a subgraph by pruning edges using question-relation similarity and optional
-    relation-pair transition scores. Returns a subgraph with the same format as input.
+    Denoise a subgraph by expanding from seed entities using question-relation similarity
+    with a similarity threshold over up to max_hops. If answers are provided, the threshold
+    is lowered until at least one answer entity appears in the subgraph.
     """
 
     def __init__(self, relation2id: Dict[str, int], config: Dict[str, Any]):
@@ -397,6 +416,11 @@ class SubgraphDenoiser:
                 seen.add(key)
                 keys.append(key)
         return keys
+
+    def _normalize_entity_set(self, entities: Optional[Iterable[Any]]) -> set:
+        if not entities:
+            return set()
+        return {self._entity_key(ent) for ent in entities if ent is not None}
 
     def _rebuild_entities(
         self,
@@ -484,6 +508,78 @@ class SubgraphDenoiser:
         rel_vecs = self.encoder.get_relation_vectors(rel_ids, self._relation_desc)
         scores = self.encoder.similarity(q_vec, rel_vecs)
         return {rel_id: float(score) for rel_id, score in zip(rel_ids, scores)}
+
+    def _build_edge_adjacency(self, edges: List[Edge]) -> Dict[Any, List[Edge]]:
+        adj: Dict[Any, List[Edge]] = {}
+        for edge in edges:
+            adj.setdefault(edge.head, []).append(edge)
+            if edge.tail != edge.head:
+                adj.setdefault(edge.tail, []).append(edge)
+        return adj
+
+    def _expand_edges_by_similarity(
+        self,
+        edges: List[Edge],
+        adj: Dict[Any, List[Edge]],
+        seed_keys: Iterable[Any],
+        rel_scores: Dict[int, float],
+        threshold: float,
+        max_hops: int,
+    ) -> List[Edge]:
+        if not edges:
+            return []
+        if not seed_keys:
+            return []
+        threshold = max(min(threshold, 1.0), -1.0)
+        frontier = set(seed_keys)
+        visited = set(frontier)
+        kept_indices: set = set()
+        for _ in range(max_hops):
+            if not frontier:
+                break
+            next_frontier = set()
+            for node in frontier:
+                for edge in adj.get(node, []):
+                    if rel_scores.get(edge.rel_id, 0.0) < threshold:
+                        continue
+                    kept_indices.add(edge.index)
+                    other = edge.tail if edge.head == node else edge.head
+                    if other not in visited:
+                        visited.add(other)
+                        next_frontier.add(other)
+            frontier = next_frontier
+        kept_edges = [edge for edge in edges if edge.index in kept_indices]
+        return kept_edges
+
+    @staticmethod
+    def _threshold_schedule(start: float, stop: float, step: float) -> List[float]:
+        if step <= 0:
+            return [start]
+        thresholds: List[float] = []
+        current = start
+        while True:
+            thresholds.append(current)
+            if current <= stop:
+                break
+            current = current - step
+            if current < stop:
+                current = stop
+        return thresholds
+
+    def _answers_in_subgraph(
+        self,
+        edges: List[Edge],
+        answer_keys: set,
+        topic_keys: set,
+    ) -> bool:
+        if not answer_keys:
+            return False
+        if answer_keys & topic_keys:
+            return True
+        for edge in edges:
+            if edge.head in answer_keys or edge.tail in answer_keys:
+                return True
+        return False
 
     def _edge_scores(
         self, edges: List[Edge], rel_scores: Dict[int, float], pair_stats: Optional[PairStats], gamma: float
@@ -636,6 +732,7 @@ class SubgraphDenoiser:
         question: str,
         subgraph: Dict[str, Any],
         topic_entities: Optional[Iterable[Any]] = None,
+        answer_entities: Optional[Iterable[Any]] = None,
     ) -> Dict[str, Any]:
         # if not self.config.enable:
         #     return subgraph
@@ -646,26 +743,34 @@ class SubgraphDenoiser:
         if not edges:
             return subgraph
 
-        pair_stats = self.global_pair_stats
-        if self.config.enable_pair_score and pair_stats is None:
-            pair_stats = build_local_pair_stats(edges)
+        topic_keys = self._normalize_entity_set(topic_entities)
+        if not topic_keys:
+            return subgraph
 
-        strict_edges = self._denoise_stage(
-            question, edges, topic_entities, self.config.strict, pair_stats
+        rel_ids = list({edge.rel_id for edge in edges})
+        rel_scores = self._score_relations(question, rel_ids)
+        adj = self._build_edge_adjacency(edges)
+        answer_keys = self._normalize_entity_set(answer_entities)
+
+        thresholds = self._threshold_schedule(
+            self.config.sim_threshold,
+            self.config.sim_threshold_min,
+            self.config.sim_threshold_step,
         )
-        min_edges = self._min_edges_threshold(len(edges))
-        if len(strict_edges) < min_edges:
-            logger.debug(
-                "Strict denoise too small (%d < %d), falling back to loose.",
-                len(strict_edges),
-                min_edges,
+        kept_edges: List[Edge] = []
+        for threshold in thresholds:
+            kept_edges = self._expand_edges_by_similarity(
+                edges,
+                adj,
+                topic_keys,
+                rel_scores,
+                threshold,
+                self.config.max_hops,
             )
-            loose_edges = self._denoise_stage(
-                question, edges, topic_entities, self.config.loose, pair_stats
-            )
-            kept_edges = loose_edges
-        else:
-            kept_edges = strict_edges
+            if not answer_keys:
+                break
+            if self._answers_in_subgraph(kept_edges, answer_keys, topic_keys):
+                break
 
         new_subgraph = dict(subgraph)
         kept_tuples = [edge.original for edge in kept_edges]

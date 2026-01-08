@@ -222,6 +222,10 @@ def main():
     parser.add_argument("--enable_pair_score", default=False, type=bool_flag)
     parser.add_argument("--pair_stats_path", default=None, type=str)
     parser.add_argument("--ensure_connectivity", default=True, type=bool_flag)
+    parser.add_argument("--denoise_sim_threshold", default=0.2, type=float)
+    parser.add_argument("--denoise_sim_threshold_min", default=-1.0, type=float)
+    parser.add_argument("--denoise_sim_threshold_step", default=0.05, type=float)
+    parser.add_argument("--denoise_max_hops", default=4, type=int)
 
     args = parser.parse_args()
 
@@ -253,10 +257,12 @@ def main():
     # Important: avoid passing empty entities_cid by using "or" fallback
     topic_entities_for_denoiser = sample.get("entities_cid") or sample.get("entities") or []
 
+    answers_for_denoiser = sample.get("answers_cid") or sample.get("answers") or []
     denoised = denoiser.denoise(
         sample["question"],
         sample["subgraph"],
         topic_entities=topic_entities_for_denoiser,
+        answer_entities=answers_for_denoiser,
     )
 
     denoised_tuples = denoised["tuples"]
