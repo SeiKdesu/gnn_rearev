@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
+
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.preprocessing import normalize
