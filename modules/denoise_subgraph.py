@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -28,6 +29,12 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 logger = logging.getLogger(__name__)
+
+# Connectivity augmentation parameters (config追加禁止のため定数で管理)
+MAX_HOPS: Optional[int] = None  # None=unlimited
+NODE_SCORE_THRESHOLD: float = 0.2
+MAX_NODE_CONTEXT_RELS: int = 12
+MAX_NODE_CONTEXT_NEIGHBORS: int = 12
 
 
 @dataclass
@@ -334,9 +341,12 @@ class SubgraphDenoiser:
         self.id2relation = {v: k for k, v in relation2id.items()}
         self.base_relation_count = len(relation2id)
         self.config = build_denoise_config(config)
+        self._raw_config = dict(config)
         self._unknown_rel_map: Dict[str, int] = {}
         self._unknown_rel_desc: Dict[int, str] = {}
         self._next_unknown_rel_id = -1
+        self._entity2id_cache: Optional[Dict[str, int]] = None
+        self._entity2id_loaded = False
 
         self.rel_descs = load_relation_descriptions(
             self.config.relation_desc_path, relation2id
@@ -351,6 +361,463 @@ class SubgraphDenoiser:
             self.global_pair_stats = load_pair_stats(
                 self.config.pair_stats_path, relation2id
             )
+
+    def _load_entity2id(self) -> Optional[Dict[str, int]]:
+        if self._entity2id_loaded:
+            return self._entity2id_cache
+        self._entity2id_loaded = True
+
+        raw = self._raw_config.get("entity2id")
+        if isinstance(raw, dict):
+            self._entity2id_cache = {
+                self._normalize_entity_key(k): int(v) for k, v in raw.items()
+            }
+            return self._entity2id_cache
+        if not isinstance(raw, str) or not raw:
+            return None
+
+        resolved = raw
+        if not os.path.isabs(resolved):
+            data_folder = self._raw_config.get("data_folder") or ""
+            if data_folder:
+                resolved = os.path.join(data_folder, resolved)
+
+        if not os.path.exists(resolved):
+            logger.debug("entity2id file not found: %s", resolved)
+            return None
+
+        entity2id: Dict[str, int] = {}
+        try:
+            with open(resolved, "r", encoding="utf-8") as f_in:
+                for idx, line in enumerate(f_in):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 2:
+                        ent_key = self._normalize_entity_key(parts[0])
+                        try:
+                            ent_id = int(parts[1])
+                        except ValueError:
+                            ent_id = idx
+                    else:
+                        ent_key = self._normalize_entity_key(line)
+                        ent_id = idx
+                    entity2id[ent_key] = ent_id
+        except Exception as exc:
+            logger.warning("Failed to load entity2id from %s: %s", resolved, exc)
+            self._entity2id_cache = None
+            return None
+
+        self._entity2id_cache = entity2id
+        return self._entity2id_cache
+
+    def _to_int_entity_id(self, ent: Any) -> Optional[int]:
+        if ent is None:
+            return None
+        if isinstance(ent, bool):
+            return None
+        if isinstance(ent, int):
+            return ent
+        if isinstance(ent, float) and ent.is_integer():
+            return int(ent)
+        if isinstance(ent, dict):
+            if "kb_id" in ent and ent["kb_id"] is not None:
+                return self._to_int_entity_id(ent["kb_id"])
+            if "text" in ent and ent["text"] is not None:
+                return self._to_int_entity_id(ent["text"])
+            if "id" in ent and ent["id"] is not None:
+                return self._to_int_entity_id(ent["id"])
+            return None
+        if isinstance(ent, str):
+            key = self._normalize_entity_key(ent)
+            try:
+                return int(key)
+            except ValueError:
+                pass
+            entity2id = self._load_entity2id()
+            if entity2id is not None and key in entity2id:
+                return entity2id[key]
+            return None
+        return None
+
+    def _normalize_seed_ids(
+        self, topic_entities: Optional[Iterable[Any]]
+    ) -> Tuple[List[int], int, List[Any]]:
+        if not topic_entities:
+            return [], 0, []
+        seeds: List[int] = []
+        seen = set()
+        skipped = 0
+        skipped_examples: List[Any] = []
+        for ent in topic_entities:
+            ent_id = self._to_int_entity_id(ent)
+            if ent_id is None:
+                skipped += 1
+                if len(skipped_examples) < 5:
+                    skipped_examples.append(ent)
+                continue
+            if ent_id in seen:
+                continue
+            seen.add(ent_id)
+            seeds.append(ent_id)
+        return seeds, skipped, skipped_examples
+
+    def _build_node_context(
+        self, base_tuples: List[Tuple[Any, Any, Any]]
+    ) -> Tuple[Dict[int, Dict[str, Any]], List[Tuple[int, Any, int]]]:
+        ctx: Dict[int, Dict[str, Any]] = {}
+        base_edges_int: List[Tuple[int, Any, int]] = []
+        skipped = 0
+        for tpl in base_tuples:
+            if len(tpl) != 3:
+                continue
+            sbj, rel, obj = tpl
+            u = self._to_int_entity_id(sbj)
+            v = self._to_int_entity_id(obj)
+            if u is None or v is None:
+                skipped += 1
+                continue
+            base_edges_int.append((u, rel, v))
+            rel_id = self._relation_id(rel)
+
+            cu = ctx.setdefault(u, {"out_rels": set(), "in_rels": set(), "nbrs": set()})
+            cv = ctx.setdefault(v, {"out_rels": set(), "in_rels": set(), "nbrs": set()})
+            cu["out_rels"].add(rel_id)
+            cv["in_rels"].add(rel_id)
+            cu["nbrs"].add(v)
+            cv["nbrs"].add(u)
+        if skipped:
+            logger.warning(
+                "Node context: skipped %d tuples with non-int-convertible endpoints.", skipped
+            )
+        return ctx, base_edges_int
+
+    def _entity_text(self, eid: int, node_ctx: Dict[int, Dict[str, Any]]) -> str:
+        parts: List[str] = [f"entity:{eid}"]
+        info = node_ctx.get(eid)
+        if not info:
+            return " ".join(parts)
+
+        out_rels = list(info.get("out_rels") or [])
+        in_rels = list(info.get("in_rels") or [])
+        nbrs = list(info.get("nbrs") or [])
+
+        rel_texts: List[str] = []
+        for rel_id in out_rels[: MAX_NODE_CONTEXT_RELS // 2]:
+            rel_texts.append(self._relation_desc(rel_id))
+        for rel_id in in_rels[: MAX_NODE_CONTEXT_RELS // 2]:
+            rel_texts.append(self._relation_desc(rel_id))
+        if rel_texts:
+            parts.append("relations:" + " | ".join(rel_texts))
+
+        if nbrs:
+            nbrs_sorted = sorted(nbrs)[:MAX_NODE_CONTEXT_NEIGHBORS]
+            parts.append("neighbors:" + " ".join(f"entity:{n}" for n in nbrs_sorted))
+
+        return " ".join(parts)
+
+    @staticmethod
+    def _cosine_similarity(q_vec: Any, x_vec: Any) -> float:
+        if sp is not None and (sp.issparse(q_vec) or sp.issparse(x_vec)):
+            q = q_vec
+            x = x_vec
+            if not sp.issparse(q):
+                q = sp.csr_matrix(np.asarray(q))
+            if not sp.issparse(x):
+                x = sp.csr_matrix(np.asarray(x))
+            if q.shape[0] != 1:
+                q = q[:1]
+            if x.shape[0] != 1:
+                x = x[:1]
+            dot = float(q.multiply(x).sum())
+            qn = math.sqrt(float(q.multiply(q).sum()))
+            xn = math.sqrt(float(x.multiply(x).sum()))
+            if qn <= 0.0 or xn <= 0.0:
+                return 0.0
+            return dot / (qn * xn)
+
+        q = np.asarray(q_vec)
+        x = np.asarray(x_vec)
+        if q.ndim == 2:
+            q = q[0]
+        if x.ndim == 2:
+            x = x[0]
+        qn = float(np.linalg.norm(q))
+        xn = float(np.linalg.norm(x))
+        if qn <= 0.0 or xn <= 0.0:
+            return 0.0
+        return float(np.dot(q, x) / (qn * xn))
+
+    def _score_nodes(
+        self, question: str, node_ids: Iterable[int], node_ctx: Dict[int, Dict[str, Any]]
+    ) -> Dict[int, float]:
+        q_vec = self.encoder.encode_text(question)
+        scores: Dict[int, float] = {}
+        for eid in node_ids:
+            text = self._entity_text(eid, node_ctx)
+            e_vec = self.encoder.encode_text(text)
+            scores[eid] = self._cosine_similarity(q_vec, e_vec)
+        return scores
+
+    @staticmethod
+    def _relation_key(rel: Any) -> Any:
+        if isinstance(rel, dict):
+            try:
+                return json.dumps(rel, sort_keys=True, ensure_ascii=False)
+            except Exception:
+                return str(rel)
+        try:
+            hash(rel)
+            return rel
+        except Exception:
+            return str(rel)
+
+    def _tuple_key(self, sbj: int, rel: Any, obj: int) -> Tuple[int, Any, int]:
+        return (sbj, self._relation_key(rel), obj)
+
+    def _reachable_out(self, tuples: Iterable[Tuple[int, Any, int]], seeds: List[int]) -> set:
+        reachable = set(seeds)
+        if not seeds:
+            return reachable
+        adj: Dict[int, List[int]] = {}
+        for sbj, _, obj in tuples:
+            adj.setdefault(sbj, []).append(obj)
+        q: deque = deque(seeds)
+        hops: Optional[int] = MAX_HOPS
+        if hops is None:
+            while q:
+                node = q.popleft()
+                for nbr in adj.get(node, []):
+                    if nbr in reachable:
+                        continue
+                    reachable.add(nbr)
+                    q.append(nbr)
+            return reachable
+        depth: Dict[int, int] = {s: 0 for s in seeds}
+        while q:
+            node = q.popleft()
+            d = depth.get(node, 0)
+            if d >= hops:
+                continue
+            for nbr in adj.get(node, []):
+                if nbr in reachable:
+                    continue
+                reachable.add(nbr)
+                depth[nbr] = d + 1
+                q.append(nbr)
+        return reachable
+
+    def _bfs_parent_edges(
+        self,
+        tuples: Iterable[Tuple[Any, Any, Any]],
+        seeds: List[int],
+        *,
+        allow_reverse: bool,
+    ) -> Dict[int, Tuple[int, Any]]:
+        parent: Dict[int, Tuple[int, Any]] = {}
+        adj: Dict[int, List[Tuple[int, Any]]] = {}
+        for tpl in tuples:
+            if len(tpl) != 3:
+                continue
+            sbj, rel, obj = tpl
+            u = self._to_int_entity_id(sbj)
+            v = self._to_int_entity_id(obj)
+            if u is None or v is None:
+                continue
+            adj.setdefault(u, []).append((v, rel))
+            if allow_reverse:
+                adj.setdefault(v, []).append((u, rel))
+
+        visited = set(seeds)
+        q: deque = deque(seeds)
+        hops: Optional[int] = MAX_HOPS
+        if hops is None:
+            while q:
+                node = q.popleft()
+                for nbr, rel in adj.get(node, []):
+                    if nbr in visited:
+                        continue
+                    visited.add(nbr)
+                    parent[nbr] = (node, rel)
+                    q.append(nbr)
+            return parent
+
+        depth: Dict[int, int] = {s: 0 for s in seeds}
+        while q:
+            node = q.popleft()
+            d = depth.get(node, 0)
+            if d >= hops:
+                continue
+            for nbr, rel in adj.get(node, []):
+                if nbr in visited:
+                    continue
+                visited.add(nbr)
+                parent[nbr] = (node, rel)
+                depth[nbr] = d + 1
+                q.append(nbr)
+        return parent
+
+    def _restore_path_edges(
+        self, target: int, seeds_set: set, parent: Dict[int, Tuple[int, Any]]
+    ) -> List[Tuple[int, Any, int]]:
+        path_edges: List[Tuple[int, Any, int]] = []
+        node = target
+        guard = 0
+        while node not in seeds_set:
+            if node not in parent:
+                return []
+            prev, rel = parent[node]
+            path_edges.append((prev, rel, node))
+            node = prev
+            guard += 1
+            if guard > 1_000_000:
+                raise RuntimeError("Connectivity augment: parent loop detected.")
+        path_edges.reverse()
+        return path_edges
+
+    def _ensure_connectivity_augment(
+        self,
+        out_subgraph: Dict[str, Any],
+        base_tuples: List[Tuple[Any, Any, Any]],
+        topic_entities: Optional[Iterable[Any]],
+    ) -> Dict[str, Any]:
+        seeds, skipped, skipped_examples = self._normalize_seed_ids(topic_entities)
+        if skipped:
+            logger.warning(
+                "Connectivity(augment): skipped %d unconvertible seeds; examples=%s",
+                skipped,
+                skipped_examples,
+            )
+        if not seeds:
+            raise RuntimeError(
+                "Connectivity(augment) failed: no valid seed entity ids after conversion."
+            )
+
+        out_tuples_raw = list(out_subgraph.get("tuples") or [])
+        out_entities_raw = list(out_subgraph.get("entities") or [])
+
+        out_tuple_map: Dict[Tuple[int, Any, int], Tuple[int, Any, int]] = {}
+        for tpl in out_tuples_raw:
+            if len(tpl) != 3:
+                continue
+            sbj, rel, obj = tpl
+            u = self._to_int_entity_id(sbj)
+            v = self._to_int_entity_id(obj)
+            if u is None or v is None:
+                raise RuntimeError(
+                    f"Connectivity(augment) failed: non-convertible tuple endpoints: {tpl}"
+                )
+            key = self._tuple_key(u, rel, v)
+            out_tuple_map.setdefault(key, (u, rel, v))
+
+        out_entity_ids: List[int] = []
+        out_entity_set = set()
+        bad_entities: List[Any] = []
+        for ent in out_entities_raw:
+            ent_id = self._to_int_entity_id(ent)
+            if ent_id is None:
+                if len(bad_entities) < 5:
+                    bad_entities.append(ent)
+                continue
+            if ent_id in out_entity_set:
+                continue
+            out_entity_set.add(ent_id)
+            out_entity_ids.append(ent_id)
+        if bad_entities:
+            raise RuntimeError(
+                f"Connectivity(augment) failed: non-convertible entities in out_subgraph['entities']: {bad_entities}"
+            )
+
+        seeds_set = set(seeds)
+        out_entity_set |= seeds_set
+
+        endpoints = set()
+        for sbj, _, obj in out_tuple_map.values():
+            endpoints.add(sbj)
+            endpoints.add(obj)
+
+        v_out = set(endpoints) | set(out_entity_set) | seeds_set
+
+        reachable = self._reachable_out(out_tuple_map.values(), seeds)
+        unreachable = v_out - reachable
+
+        logger.info(
+            "Connectivity(augment): seeds=%d, V_out=%d, edges=%d, unreachable=%d",
+            len(seeds),
+            len(v_out),
+            len(out_tuple_map),
+            len(unreachable),
+        )
+
+        added_edges = 0
+        if unreachable:
+            parent_dir = self._bfs_parent_edges(base_tuples, seeds, allow_reverse=False)
+            for t in list(unreachable):
+                if t in seeds_set:
+                    continue
+                if t not in parent_dir:
+                    continue
+                for u, rel, v in self._restore_path_edges(t, seeds_set, parent_dir):
+                    key = self._tuple_key(u, rel, v)
+                    if key in out_tuple_map:
+                        continue
+                    out_tuple_map[key] = (u, rel, v)
+                    added_edges += 1
+
+            reachable = self._reachable_out(out_tuple_map.values(), seeds)
+            unreachable = v_out - reachable
+
+        if unreachable:
+            parent_rev = self._bfs_parent_edges(base_tuples, seeds, allow_reverse=True)
+            for t in list(unreachable):
+                if t in seeds_set:
+                    continue
+                if t not in parent_rev:
+                    continue
+                for u, rel, v in self._restore_path_edges(t, seeds_set, parent_rev):
+                    key = self._tuple_key(u, rel, v)
+                    if key in out_tuple_map:
+                        continue
+                    out_tuple_map[key] = (u, rel, v)
+                    added_edges += 1
+
+            reachable = self._reachable_out(out_tuple_map.values(), seeds)
+            unreachable = v_out - reachable
+
+        if unreachable:
+            examples = sorted(unreachable)[:5]
+            raise RuntimeError(
+                f"Connectivity(augment) failed: candidate graph disconnected; remaining unreachable={len(unreachable)}, examples={examples}"
+            )
+
+        endpoints_final = set()
+        for sbj, _, obj in out_tuple_map.values():
+            endpoints_final.add(sbj)
+            endpoints_final.add(obj)
+        entities_final = sorted(endpoints_final | out_entity_set | seeds_set)
+        v_final = set(entities_final)
+
+        reachable_final = self._reachable_out(out_tuple_map.values(), seeds)
+        if not v_final.issubset(reachable_final):
+            remain = sorted(v_final - reachable_final)[:10]
+            raise RuntimeError(
+                f"Connectivity(augment) assertion failed: unreachable nodes remain: {remain}"
+            )
+
+        out = dict(out_subgraph)
+        out["tuples"] = [
+            out_tuple_map[k]
+            for k in sorted(out_tuple_map.keys(), key=lambda x: (x[0], str(x[1]), x[2]))
+        ]
+        out["entities"] = entities_final
+        logger.info(
+            "Connectivity(augment): added_edges=%d, final_edges=%d, final_entities=%d",
+            added_edges,
+            len(out_tuple_map),
+            len(entities_final),
+        )
+        return out
 
     def _build_encoder(self, relation_texts: List[str]) -> BaseEncoder:
         encoder_type = (self.config.encoder_type or "tfidf").lower()
@@ -637,52 +1104,122 @@ class SubgraphDenoiser:
         subgraph: Dict[str, Any],
         topic_entities: Optional[Iterable[Any]] = None,
     ) -> Dict[str, Any]:
-        # if not self.config.enable:
-        #     return subgraph
-        tuples = subgraph.get("tuples", [])
-        if not tuples:
-            return subgraph
-        edges = self._parse_edges(tuples)
-        if not edges:
-            return subgraph
+        base_tuples = list(subgraph.get("tuples") or [])
 
-        pair_stats = self.global_pair_stats
-        if self.config.enable_pair_score and pair_stats is None:
-            pair_stats = build_local_pair_stats(edges)
+        seeds, skipped, skipped_examples = self._normalize_seed_ids(topic_entities)
+        if skipped:
+            logger.warning(
+                "Node scoring: skipped %d unconvertible seeds; examples=%s",
+                skipped,
+                skipped_examples,
+            )
+        if not seeds:
+            raise RuntimeError("Denoise failed: no valid seed entities.")
+        seeds_set = set(seeds)
 
-        strict_edges = self._denoise_stage(
-            question, edges, topic_entities, self.config.strict, pair_stats
+        node_ctx, base_edges_int = self._build_node_context(base_tuples)
+
+        candidate_nodes = set(seeds_set)
+        for u, _, v in base_edges_int:
+            candidate_nodes.add(u)
+            candidate_nodes.add(v)
+        for ent in subgraph.get("entities") or []:
+            ent_id = self._to_int_entity_id(ent)
+            if ent_id is not None:
+                candidate_nodes.add(ent_id)
+
+        node_scores = self._score_nodes(question, candidate_nodes, node_ctx)
+        strict_candidates = [
+            (eid, score)
+            for eid, score in node_scores.items()
+            if score > NODE_SCORE_THRESHOLD and eid not in seeds_set
+        ]
+        strict_candidates.sort(key=lambda x: x[1], reverse=True)
+
+        top_k_nodes = int(self.config.strict.top_k_rel)
+        if top_k_nodes < 0:
+            top_k_nodes = 0
+        strict_nodes = [eid for eid, _ in strict_candidates[:top_k_nodes]]
+        selected_nodes = set(strict_nodes) | seeds_set
+
+        logger.info(
+            "Node selection: strict_nodes=%d (threshold>%.3f, K=%d), selected_nodes=%d",
+            len(strict_nodes),
+            NODE_SCORE_THRESHOLD,
+            top_k_nodes,
+            len(selected_nodes),
         )
-        min_edges = self._min_edges_threshold(len(edges))
-        if len(strict_edges) < min_edges:
-            logger.debug(
-                "Strict denoise too small (%d < %d), falling back to loose.",
-                len(strict_edges),
+        logger.debug(
+            "Top strict_nodes (up to 5): %s",
+            [(eid, float(score)) for eid, score in strict_candidates[:5]],
+        )
+
+        out_tuple_map: Dict[Tuple[int, Any, int], Tuple[int, Any, int]] = {}
+        internal_count = 0
+        boundary_count = 0
+        for u, rel, v in base_edges_int:
+            in_u = u in selected_nodes
+            in_v = v in selected_nodes
+            if not (in_u or in_v):
+                continue
+            if in_u and in_v:
+                internal_count += 1
+            else:
+                boundary_count += 1
+            key = self._tuple_key(u, rel, v)
+            out_tuple_map.setdefault(key, (u, rel, v))
+
+        out_tuples_initial = list(out_tuple_map.values())
+        logger.info(
+            "Node-induced: edges=%d (internal=%d, boundary=%d)",
+            len(out_tuples_initial),
+            internal_count,
+            boundary_count,
+        )
+
+        min_edges = self._min_edges_threshold(len(base_edges_int))
+        if len(out_tuple_map) < min_edges:
+            before = len(out_tuple_map)
+            for u, rel, v in base_edges_int:
+                if len(out_tuple_map) >= min_edges:
+                    break
+                if not (u in selected_nodes or v in selected_nodes):
+                    continue
+                key = self._tuple_key(u, rel, v)
+                out_tuple_map.setdefault(key, (u, rel, v))
+            logger.info(
+                "Sparsity prevention: edges %d -> %d (min_edges=%d)",
+                before,
+                len(out_tuple_map),
                 min_edges,
             )
-            loose_edges = self._denoise_stage(
-                question, edges, topic_entities, self.config.loose, pair_stats
-            )
-            kept_edges = loose_edges
         else:
-            kept_edges = strict_edges
+            logger.info(
+                "Sparsity prevention: edges=%d (min_edges=%d)",
+                len(out_tuple_map),
+                min_edges,
+            )
+
+        endpoints = set()
+        for u, _, v in out_tuple_map.values():
+            endpoints.add(u)
+            endpoints.add(v)
 
         new_subgraph = dict(subgraph)
-        kept_tuples = [edge.original for edge in kept_edges]
-        new_subgraph["tuples"] = kept_tuples
-        original_entities = subgraph.get("entities")
-        new_entities = self._rebuild_entities(kept_tuples, original_entities, topic_entities)
-        new_subgraph["entities"] = new_entities
-        original_entity_count = (
-            len(original_entities)
-            if original_entities is not None
-            else len(self._tuple_entity_keys(tuples))
+        internal_keys = []
+        boundary_keys = []
+        for k in out_tuple_map.keys():
+            sbj, _, obj = k
+            if sbj in selected_nodes and obj in selected_nodes:
+                internal_keys.append(k)
+            else:
+                boundary_keys.append(k)
+        internal_keys.sort(key=lambda x: (x[0], str(x[1]), x[2]))
+        boundary_keys.sort(key=lambda x: (x[0], str(x[1]), x[2]))
+        new_subgraph["tuples"] = [out_tuple_map[k] for k in (internal_keys + boundary_keys)]
+        new_subgraph["entities"] = sorted(endpoints | selected_nodes)
+
+        new_subgraph = self._ensure_connectivity_augment(
+            new_subgraph, base_tuples, topic_entities
         )
-        # print(
-        #     f"Denoise subgraph: edges {len(tuple)} -> {len(kept_tuples)}, entities {original_entity_count} -> {len(new_entities)}",
-        #     len(tuples),
-        #     len(kept_tuples),
-        #     original_entity_count,
-        #     len(new_entities),
-        # )
         return new_subgraph
