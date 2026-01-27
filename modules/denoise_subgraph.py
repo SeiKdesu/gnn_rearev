@@ -1180,23 +1180,17 @@ class SubgraphDenoiser:
 
         min_edges = self._min_edges_threshold(len(base_edges_int))
         if len(out_tuple_map) < min_edges:
-            before = len(out_tuple_map)
-            for u, rel, v in base_edges_int:
-                if len(out_tuple_map) >= min_edges:
-                    break
-                if not (u in selected_nodes or v in selected_nodes):
-                    continue
-                key = self._tuple_key(u, rel, v)
-                out_tuple_map.setdefault(key, (u, rel, v))
-            logger.info(
-                "Sparsity prevention: edges %d -> %d (min_edges=%d)",
-                before,
+            logger.warning(
+                "Sparsity prevention: strict_nodes=%d, selected_nodes=%d, out_edges=%d < min_edges=%d. "
+                "Not enforcing min_edges because candidate edges may be insufficient.",
+                len(strict_nodes),
+                len(selected_nodes),
                 len(out_tuple_map),
                 min_edges,
             )
         else:
             logger.info(
-                "Sparsity prevention: edges=%d (min_edges=%d)",
+                "Sparsity prevention: out_edges=%d (min_edges=%d)",
                 len(out_tuple_map),
                 min_edges,
             )
