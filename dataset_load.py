@@ -14,6 +14,13 @@ import time
 
 import os
 
+from subgraph_union_graph import load_union_graph
+from subgraph_policy import load_policy_ckpt, expand_sample_subgraph
+
+
+_PSE_UNION_GRAPH_MEMO = {}
+_PSE_POLICY_MEMO = {}
+
 
 class BasicDataLoader(object):
     """ 
@@ -24,6 +31,7 @@ class BasicDataLoader(object):
     def __init__(self, config, word2id, relation2id, entity2id, tokenize, data_type="train"):
         self.tokenize = tokenize
         self._parse_args(config, word2id, relation2id, entity2id)
+        self._init_union_graph_and_policy(config, tokenize)
         self._load_file(config, data_type)
         self._load_data()
         
@@ -46,6 +54,7 @@ class BasicDataLoader(object):
             for line in tqdm(f_in):
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
                 line = json.loads(line)
+                line = self._maybe_expand_subgraph(line)
                 
                 if len(line['entities']) == 0:
                     skip_index.add(index)
@@ -56,6 +65,14 @@ class BasicDataLoader(object):
 
         print("skip", skip_index)
         print('max_facts: ', self.max_facts)
+        if getattr(self, "enable_policy_expand", False):
+            avg_ent = float(np.mean([len(s.get("subgraph", {}).get("entities", [])) for s in self.data])) if self.data else 0.0
+            avg_tpl = float(np.mean([len(s.get("subgraph", {}).get("tuples", [])) for s in self.data])) if self.data else 0.0
+            cov = self._answer_coverage(self.data)
+            print(
+                f"[PSE] split={data_type} avg_entities={avg_ent:.2f} avg_tuples={avg_tpl:.2f} "
+                f"answer_coverage={cov*100:.2f}%"
+            )
         self.num_data = len(self.data)
         self.batches = np.arange(self.num_data)
 
@@ -115,6 +132,7 @@ class BasicDataLoader(object):
         self.entity2id = entity2id
         self.id2entity = {i: entity for entity, i in entity2id.items()}
         self.q_type = config['q_type']
+        self.enable_policy_expand = bool(config.get("enable_policy_expand", False))
 
         if self.use_inverse_relation:
             self.num_kb_relation = 2 * len(relation2id)
@@ -125,6 +143,118 @@ class BasicDataLoader(object):
         print("Entity: {}, Relation in KB: {}, Relation in use: {} ".format(len(entity2id),
                                                                             len(self.relation2id),
                                                                             self.num_kb_relation))
+
+    def _init_union_graph_and_policy(self, args, tokenize):
+        """
+        Initialize train-only union graph + edge policy (CPU by default) for inference-time expansion.
+        This MUST NOT use dev/test answers; it loads caches created from train.json only.
+        """
+        self._pse_union_adj = None
+        self._pse_union_meta = None
+        self._pse_policy = None
+
+        if not getattr(self, "enable_policy_expand", False):
+            return
+
+        data_folder = args["data_folder"]
+        union_cache = args.get("union_graph_cache") or os.path.join(data_folder, "cache/union_graph.pkl")
+        policy_ckpt = args.get("policy_ckpt") or os.path.join(data_folder, "cache/policy_ckpt.pt")
+        policy_device = args.get("policy_device") or "cpu"
+
+        if not os.path.exists(union_cache) or not os.path.exists(policy_ckpt):
+            raise RuntimeError(
+                "[PSE] enable_policy_expand=True but cache/ckpt missing.\n"
+                f"  union_graph_cache: {union_cache} (exists={os.path.exists(union_cache)})\n"
+                f"  policy_ckpt: {policy_ckpt} (exists={os.path.exists(policy_ckpt)})\n"
+                "Build them from TRAIN ONLY using:\n"
+                "  python3 main.py --mode train_policy --data_folder <data_folder> --lm <lstm|bert|...>\n"
+            )
+
+        if union_cache in _PSE_UNION_GRAPH_MEMO:
+            self._pse_union_adj, self._pse_union_meta = _PSE_UNION_GRAPH_MEMO[union_cache]
+        else:
+            self._pse_union_adj, self._pse_union_meta = load_union_graph(union_cache)
+            _PSE_UNION_GRAPH_MEMO[union_cache] = (self._pse_union_adj, self._pse_union_meta)
+
+        policy_key = (policy_ckpt, policy_device)
+        if policy_key in _PSE_POLICY_MEMO:
+            self._pse_policy = _PSE_POLICY_MEMO[policy_key]
+        else:
+            self._pse_policy = load_policy_ckpt(
+                policy_ckpt,
+                word2id=self.word2id,
+                map_location=policy_device,
+                override_device=policy_device,
+            )
+            _PSE_POLICY_MEMO[policy_key] = self._pse_policy
+
+        # Expansion hyperparams (defaults align with spec).
+        self._pse_expand_hops = int(args.get("policy_expand_hops", 2))
+        self._pse_topk_per_node = int(args.get("policy_topk_per_node", 20))
+        self._pse_max_new_edges_per_hop = int(args.get("policy_max_new_edges_per_hop", 200))
+        self._pse_max_new_edges_total = int(args.get("policy_max_new_edges_total", 800))
+        self._pse_frontier_mode = str(args.get("policy_frontier_mode", "new"))
+
+    def _maybe_expand_subgraph(self, sample):
+        if not getattr(self, "enable_policy_expand", False):
+            return sample
+        return expand_sample_subgraph(
+            sample,
+            union_adj=self._pse_union_adj,
+            policy=self._pse_policy,
+            policy_expand_hops=self._pse_expand_hops,
+            topk_per_node=self._pse_topk_per_node,
+            max_new_edges_per_hop=self._pse_max_new_edges_per_hop,
+            max_new_edges_total=self._pse_max_new_edges_total,
+            frontier_mode=self._pse_frontier_mode,
+        )
+
+    def _answer_coverage(self, samples):
+        """
+        Utility for sanity reporting only. Expansion never uses answers.
+        Coverage: fraction of samples where any answer entity id is in subgraph entities.
+        """
+        if not samples:
+            return 0.0
+        hit = 0
+        total = 0
+        for s in samples:
+            total += 1
+            ans_ids = set()
+            if "answers_cid" in s and s["answers_cid"] is not None:
+                ans_ids = set(int(x) for x in s["answers_cid"])
+            else:
+                for a in s.get("answers", []) or []:
+                    if isinstance(a, int):
+                        ans_ids.add(int(a))
+                        continue
+                    if not isinstance(a, dict):
+                        continue
+                    key = "text" if isinstance(a.get("kb_id"), int) else "kb_id"
+                    raw = a.get(key) or a.get("kb_id") or a.get("text")
+                    if raw is None:
+                        continue
+                    if isinstance(raw, int):
+                        ans_ids.add(int(raw))
+                        continue
+                    if raw in self.entity2id:
+                        ans_ids.add(int(self.entity2id[raw]))
+                        continue
+                    try:
+                        ans_ids.add(int(raw))
+                    except Exception:
+                        continue
+
+            ent = set(int(x) for x in s.get("subgraph", {}).get("entities", []) or [])
+            if not ent:
+                # fallback: endpoints
+                for tpl in s.get("subgraph", {}).get("tuples", []) or []:
+                    if isinstance(tpl, (list, tuple)) and len(tpl) == 3:
+                        ent.add(int(tpl[0]))
+                        ent.add(int(tpl[2]))
+            if ans_ids and ent.intersection(ans_ids):
+                hit += 1
+        return hit / max(1, total)
 
     
     def get_quest(self, training=False):
@@ -285,10 +415,16 @@ class BasicDataLoader(object):
                 tail_list.append(tail)
                 self.kb_fact_rels[next_id, i] = rel
                 if self.use_inverse_relation:
-                    head_list.append(tail)
-                    rel_list.append(rel + len(self.relation2id))
-                    tail_list.append(head)
-                    self.kb_fact_rels[next_id, i] = rel + len(self.relation2id)
+                    if self.enable_policy_expand and rel >= len(self.relation2id):
+                        # Edge already uses inverse relation id (r + |R|); add the base direction.
+                        head_list.append(tail)
+                        rel_list.append(rel - len(self.relation2id))
+                        tail_list.append(head)
+                    else:
+                        head_list.append(tail)
+                        rel_list.append(rel + len(self.relation2id))
+                        tail_list.append(head)
+                        self.kb_fact_rels[next_id, i] = rel + len(self.relation2id)
                 
             if len(tp_set) > 0:
                 for local_ent in tp_set:
@@ -463,9 +599,14 @@ class BasicDataLoader(object):
             rel_list.append(rel)
             tail_list.append(tail)
             if self.use_inverse_relation:
-                head_list.append(tail)
-                rel_list.append(rel + len(self.relation2id))
-                tail_list.append(head)
+                if self.enable_policy_expand and rel >= len(self.relation2id):
+                    head_list.append(tail)
+                    rel_list.append(rel - len(self.relation2id))
+                    tail_list.append(head)
+                else:
+                    head_list.append(tail)
+                    rel_list.append(rel + len(self.relation2id))
+                    tail_list.append(head)
 
         return np.array(head_list, dtype=int),  np.array(rel_list, dtype=int), np.array(tail_list, dtype=int)
 

@@ -11,31 +11,50 @@ from parsing import add_parse_args
 import wandb
 
 
+def _get_mode(argv):
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--mode", default="train", type=str, choices=["train", "train_policy"])
+    ns, _ = p.parse_known_args(argv)
+    return ns.mode
 
-parser = argparse.ArgumentParser()
-add_parse_args(parser)
 
-args = parser.parse_args()
-args.use_cuda = torch.cuda.is_available()
-wandb.init(
-    project='GNN-RAG-KBQA',
-    name=args.experiment_name,
-    config=vars(args),
-    mode="online",  # "offline" にするとネット接続不要でローカルログのみ
-)
+def _run_train_policy(argv):
+    from train_subgraph_policy import build_policy_arg_parser, train_policy_from_args
 
-np.random.seed(args.seed)
-torch.manual_seed(args.seed)
-if args.experiment_name == None:
-    timestamp = str(int(time.time()))
-    args.experiment_name = "{}-{}-{}".format(
-        args.dataset,
-        args.model_name,
-        timestamp,
-    )
+    parser = build_policy_arg_parser()
+    args = parser.parse_args(argv)
+    train_policy_from_args(args)
+
 
 
 def main():
+    mode = _get_mode(None)
+    if mode == "train_policy":
+        _run_train_policy(None)
+        return
+
+    parser = argparse.ArgumentParser()
+    add_parse_args(parser)
+    args = parser.parse_args()
+    args.use_cuda = torch.cuda.is_available()
+
+    wandb.init(
+        project="GNN-RAG-KBQA",
+        name=args.experiment_name,
+        config=vars(args),
+        mode="online",  # set to "offline" if you want local-only logs
+    )
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if args.experiment_name == None:
+        timestamp = str(int(time.time()))
+        args.experiment_name = "{}-{}-{}".format(
+            args.dataset,
+            args.model_name,
+            timestamp,
+        )
+
     if not os.path.exists(args.checkpoint_dir):
         os.mkdir(args.checkpoint_dir)
     logger = create_logger(args)

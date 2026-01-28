@@ -63,6 +63,17 @@ def add_shared_args(parser):
     parser.add_argument('--test_batch_size', default=20, type=int)
     parser.add_argument('--q_type', default='seq', type=str)
 
+    # Policy-based Subgraph Expansion (PSE) - optional, off by default.
+    parser.add_argument('--enable_policy_expand', default=False, type=bool_flag)
+    parser.add_argument('--union_graph_cache', default=None, type=str)
+    parser.add_argument('--policy_ckpt', default=None, type=str)
+    parser.add_argument('--policy_device', default='cpu', type=str)
+    parser.add_argument('--policy_expand_hops', default=2, type=int)
+    parser.add_argument('--policy_topk_per_node', default=20, type=int)
+    parser.add_argument('--policy_max_new_edges_per_hop', default=200, type=int)
+    parser.add_argument('--policy_max_new_edges_total', default=800, type=int)
+    parser.add_argument('--policy_frontier_mode', default='new', type=str, choices=['new', 'all'])
+
 
 
 def add_parse_args(parser):
