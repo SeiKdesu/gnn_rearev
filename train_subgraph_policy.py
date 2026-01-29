@@ -23,6 +23,8 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+import wandb
+
 from subgraph_union_graph import build_union_graph, load_union_graph
 from subgraph_policy import PolicyConfig, SubgraphPolicyGNN, save_policy_ckpt
 
@@ -214,6 +216,13 @@ def train_policy_from_args(args: argparse.Namespace) -> None:
         use_message_passing=bool(args.policy_use_message_passing),
         mp_rounds=args.policy_mp_rounds,
     )
+    if args.policy_wandb:
+        wandb.init(
+            project=args.policy_wandb_project,
+            name=args.policy_wandb_name or f"pse-policy-{os.path.basename(os.path.normpath(data_folder))}",
+            config=vars(args),
+            mode=args.policy_wandb_mode,
+        )
     model = SubgraphPolicyGNN(cfg, word2id=word2id).to(cfg.device)
     model.train()
 
@@ -290,6 +299,16 @@ def train_policy_from_args(args: argparse.Namespace) -> None:
             f"[Policy] epoch={epoch+1} loss={avg_loss:.4f} steps={total_steps} "
             f"samples_with_pos={samples_with_pos} avg_pos_edges={pos_edges_total / max(1, samples_with_pos):.2f}"
         )
+        if args.policy_wandb:
+            wandb.log(
+                {
+                    "epoch": epoch + 1,
+                    "loss": avg_loss,
+                    "steps": total_steps,
+                    "samples_with_pos": samples_with_pos,
+                    "avg_pos_edges": pos_edges_total / max(1, samples_with_pos),
+                }
+            )
         save_policy_ckpt(
             ckpt_path,
             model,
@@ -297,6 +316,8 @@ def train_policy_from_args(args: argparse.Namespace) -> None:
         )
 
     print(f"[Policy] saved checkpoint to {ckpt_path}")
+    if args.policy_wandb:
+        wandb.finish()
 
 
 def build_policy_arg_parser() -> argparse.ArgumentParser:
@@ -316,7 +337,7 @@ def build_policy_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy_ckpt", default=None, type=str)
     p.add_argument("--rebuild_union_graph", action="store_true")
 
-    p.add_argument("--policy_device", default="cpu", type=str)
+    p.add_argument("--policy_device", default=("cuda" if torch.cuda.is_available() else "cpu"), type=str)
     p.add_argument("--policy_epochs", default=3, type=int)
     p.add_argument("--policy_lr", default=1e-3, type=float)
     p.add_argument("--policy_grad_clip", default=1.0, type=float)
@@ -334,6 +355,11 @@ def build_policy_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy_use_message_passing", action="store_true")
     p.add_argument("--policy_mp_rounds", default=2, type=int)
     p.add_argument("--max_train_samples", default=0, type=int)
+
+    p.add_argument("--policy_wandb", default=True, type=int)
+    p.add_argument("--policy_wandb_project", default="GNN-RAG-KBQA", type=str)
+    p.add_argument("--policy_wandb_mode", default="online", type=str)
+    p.add_argument("--policy_wandb_name", default="", type=str)
     return p
 
 
