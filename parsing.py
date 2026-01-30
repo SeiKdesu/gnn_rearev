@@ -74,6 +74,11 @@ def add_shared_args(parser):
     parser.add_argument('--policy_max_new_edges_total', default=800, type=int)
     parser.add_argument('--policy_frontier_mode', default='new', type=str, choices=['new', 'all'])
 
+    # Shared Subgraph (merged) - optional, off by default.
+    # [shared-subgraph]
+    parser.add_argument('--use_shared_subgraph', default=False, type=bool_flag)
+    parser.add_argument('--shared_subgraph_path', default=None, type=str)
+
 
 
 def add_parse_args(parser):

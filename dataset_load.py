@@ -20,6 +20,65 @@ from subgraph_policy import load_policy_ckpt, expand_sample_subgraph
 
 _PSE_UNION_GRAPH_MEMO = {}
 _PSE_POLICY_MEMO = {}
+# Shared subgraph (merged) memoization (process-local).
+# [shared-subgraph]
+_SHARED_SUBGRAPH_MEMO = {}
+
+
+# [shared-subgraph]
+def _coerce_entity_id(x, entity2id):
+    if isinstance(x, int):
+        return int(x)
+    if isinstance(x, str):
+        if x in entity2id:
+            return int(entity2id[x])
+        try:
+            return int(x)
+        except Exception as e:
+            raise KeyError(f"Unknown entity string: {x!r}") from e
+    if isinstance(x, dict):
+        for key in ("text", "kb_id", "id"):
+            if key in x:
+                v = x[key]
+                if isinstance(v, int):
+                    return int(v)
+                if isinstance(v, str):
+                    if v in entity2id:
+                        return int(entity2id[v])
+                    try:
+                        return int(v)
+                    except Exception:
+                        pass
+        raise KeyError(f"Unknown entity dict keys: {list(x.keys())}")
+    raise TypeError(f"Unsupported entity type: {type(x)}")
+
+
+# [shared-subgraph]
+def _coerce_relation_id(x, relation2id):
+    if isinstance(x, int):
+        return int(x)
+    if isinstance(x, str):
+        if x in relation2id:
+            return int(relation2id[x])
+        try:
+            return int(x)
+        except Exception as e:
+            raise KeyError(f"Unknown relation string: {x!r}") from e
+    if isinstance(x, dict):
+        for key in ("text", "id"):
+            if key in x:
+                v = x[key]
+                if isinstance(v, int):
+                    return int(v)
+                if isinstance(v, str):
+                    if v in relation2id:
+                        return int(relation2id[v])
+                    try:
+                        return int(v)
+                    except Exception:
+                        pass
+        raise KeyError(f"Unknown relation dict keys: {list(x.keys())}")
+    raise TypeError(f"Unsupported relation type: {type(x)}")
 
 
 class BasicDataLoader(object):
@@ -54,13 +113,20 @@ class BasicDataLoader(object):
             for line in tqdm(f_in):
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
                 line = json.loads(line)
-                line = self._maybe_expand_subgraph(line)
+                if not getattr(self, "use_shared_subgraph", False):
+                    line = self._maybe_expand_subgraph(line)
+                else:
+                    # In shared-subgraph mode we ignore per-sample subgraphs; drop them to save RAM.
+                    # [shared-subgraph]
+                    if "subgraph" in line:
+                        line["subgraph"] = {"tuples": [], "entities": []}
                 
                 if len(line['entities']) == 0:
                     skip_index.add(index)
                     continue
                 self.data.append(line)
-                self.max_facts = max(self.max_facts, 2 * len(line['subgraph']['tuples']))
+                if not getattr(self, "use_shared_subgraph", False):
+                    self.max_facts = max(self.max_facts, 2 * len(line['subgraph']['tuples']))
                 index += 1
 
         print("skip", skip_index)
@@ -82,6 +148,11 @@ class BasicDataLoader(object):
         Creates mappings between global entity ids and local entity ids that are used during GNN updates.
         """
 
+        # Shared-subgraph mode builds everything lazily per-batch and reuses one merged graph.
+        # [shared-subgraph]
+        if getattr(self, "use_shared_subgraph", False):
+            return self._load_data_shared()
+
         print('converting global to local entity index ...')
         self.global2local_entity_maps = self._build_global2local_entity_maps()
 
@@ -101,6 +172,287 @@ class BasicDataLoader(object):
         self.answer_lists = np.empty(self.num_data, dtype=object)
 
         self._prepare_data()
+
+    # [shared-subgraph]
+    def _load_data_shared(self):
+        """
+        Shared-subgraph mode:
+          - Load one merged subgraph from `subgraph.json` once per process.
+          - Avoid (num_data x max_local_entity) dense precomputations.
+          - Build only per-sample lightweight metadata; build dense arrays per-batch in `get_batch`.
+        """
+        shared = self._get_shared_subgraph(self.shared_subgraph_path)
+
+        self._shared_entities = shared["entities"]
+        self._shared_g2l = shared["g2l"]
+        self._shared_base_heads = shared["heads"]
+        self._shared_base_rels = shared["rels"]
+        self._shared_base_tails = shared["tails"]
+        self._shared_num_raw_tuples = shared["num_raw_tuples"]
+        self._shared_num_raw_unique_tuples = shared["num_raw_unique_tuples"]
+        self._shared_bad_tuples = shared["bad_tuples"]
+
+        self.max_local_entity = len(self._shared_entities)
+        self.max_facts = int(len(self._shared_base_heads))
+        if self.use_self_loop:
+            # Keep semantics consistent with legacy sizing.
+            self.max_facts = self.max_facts + self.max_local_entity
+
+        print(
+            f"[shared-subgraph] split={self.data_type} path={self.shared_subgraph_path} "
+            f"|V|={self.max_local_entity} raw_tuples={self._shared_num_raw_tuples} "
+            f"unique_tuples={self._shared_num_raw_unique_tuples} bad_tuples={self._shared_bad_tuples} "
+            f"effective_facts={len(self._shared_base_heads)}"
+        )
+
+        # Per-sample lightweight caches (object arrays).
+        self.question_id = []
+        self.answer_lists = np.empty(self.num_data, dtype=object)
+        self._shared_seed_local = np.empty(self.num_data, dtype=object)
+        self._shared_answer_local = np.empty(self.num_data, dtype=object)
+
+        # Tokenize questions + precompute (small) seed/answer index lists.
+        self._prepare_data_shared()
+
+    # [shared-subgraph]
+    def _get_shared_subgraph(self, path: str):
+        cache_key = (os.path.abspath(path), bool(self.use_inverse_relation))
+        if cache_key in _SHARED_SUBGRAPH_MEMO:
+            return _SHARED_SUBGRAPH_MEMO[cache_key]
+
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"[shared-subgraph] subgraph.json not found: {path!r}\n"
+                "Build it (train-only) using:\n"
+                "  python3 scripts/build_shared_subgraph.py --input <data_folder>/train.json --output <data_folder>/subgraph.json"
+            )
+
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        entities_in = payload.get("entities", []) or []
+        tuples_in = payload.get("tuples", []) or []
+
+        # Coerce + unique-preserve entity list.
+        entities = []
+        seen_ent = set()
+        for e in entities_in:
+            eid = _coerce_entity_id(e, self.entity2id)
+            if eid in seen_ent:
+                continue
+            seen_ent.add(eid)
+            entities.append(eid)
+        g2l = {eid: i for i, eid in enumerate(entities)}
+
+        # Coerce + dedup tuples; also ensure endpoints are present in `entities`.
+        tuple_seen = set()
+        heads = []
+        rels = []
+        tails = []
+        bad_tuples = 0
+        num_raw_tuples = 0
+        num_raw_unique_tuples = 0
+        num_base_rel = len(self.relation2id)
+
+        for tpl in tuples_in:
+            if not isinstance(tpl, (list, tuple)) or len(tpl) != 3:
+                continue
+            num_raw_tuples += 1
+            try:
+                h = _coerce_entity_id(tpl[0], self.entity2id)
+                r = _coerce_relation_id(tpl[1], self.relation2id)
+                t = _coerce_entity_id(tpl[2], self.entity2id)
+            except Exception:
+                bad_tuples += 1
+                continue
+
+            key = (h, r, t)
+            if key in tuple_seen:
+                continue
+            tuple_seen.add(key)
+            num_raw_unique_tuples += 1
+
+            # Repair in-memory if endpoints are missing from entities.
+            # [shared-subgraph]
+            if h not in g2l:
+                g2l[h] = len(entities)
+                entities.append(h)
+            if t not in g2l:
+                g2l[t] = len(entities)
+                entities.append(t)
+
+            h_l = g2l[h]
+            t_l = g2l[t]
+            heads.append(h_l)
+            rels.append(r)
+            tails.append(t_l)
+            if self.use_inverse_relation:
+                if int(r) >= num_base_rel:
+                    heads.append(t_l)
+                    rels.append(int(r) - num_base_rel)
+                    tails.append(h_l)
+                else:
+                    heads.append(t_l)
+                    rels.append(int(r) + num_base_rel)
+                    tails.append(h_l)
+
+        out = {
+            "entities": entities,
+            "g2l": g2l,
+            "heads": np.asarray(heads, dtype=np.int64),
+            "rels": np.asarray(rels, dtype=np.int64),
+            "tails": np.asarray(tails, dtype=np.int64),
+            "num_raw_tuples": int(num_raw_tuples),
+            "num_raw_unique_tuples": int(num_raw_unique_tuples),
+            "bad_tuples": int(bad_tuples),
+        }
+        _SHARED_SUBGRAPH_MEMO[cache_key] = out
+        return out
+
+    # [shared-subgraph]
+    def _prepare_data_shared(self):
+        """
+        Shared-subgraph variant of `_prepare_data`:
+          - Tokenizes questions for all samples (same as legacy).
+          - Precomputes only lightweight per-sample lists:
+              * seed local indices
+              * answer local indices + answer global lists
+        """
+        max_count = 0
+        for line in self.data:
+            word_list = line["question"].split(" ")
+            max_count = max(max_count, len(word_list))
+
+        if self.rel_word_emb:
+            self.build_rel_words(self.tokenize)
+        else:
+            self.rel_texts = None
+            self.rel_texts_inv = None
+            self.ent_texts = None
+
+        self.max_query_word = max_count
+
+        # build tokenizers
+        if self.tokenize == "lstm":
+            self.num_word = len(self.word2id)
+            self.tokenizer = LSTMTokenizer(self.word2id, self.max_query_word)
+            self.query_texts = np.full((self.num_data, self.max_query_word), self.num_word, dtype=int)
+        else:
+            if self.tokenize == "bert":
+                tokenizer_name = "bert-base-uncased"
+            elif self.tokenize == "roberta":
+                tokenizer_name = "roberta-base"
+            elif self.tokenize == "sbert":
+                tokenizer_name = "sentence-transformers/all-MiniLM-L6-v2"
+            elif self.tokenize == "sbert2":
+                tokenizer_name = "sentence-transformers/all-mpnet-base-v2"
+            elif self.tokenize == "t5":
+                tokenizer_name = "t5-small"
+            elif self.tokenize == "simcse":
+                tokenizer_name = "princeton-nlp/sup-simcse-bert-base-uncased"
+            elif self.tokenize == "relbert":
+                tokenizer_name = "pretrained_lms/sr-simbert/"
+            else:
+                tokenizer_name = "bert-base-uncased"
+
+            self.max_query_word = max_count + 2  # [CLS] + [SEP]
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+            self.num_word = self.tokenizer.convert_tokens_to_ids(self.tokenizer.pad_token)
+            self.query_texts = np.full((self.num_data, self.max_query_word), self.num_word, dtype=int)
+
+        g2l = self._shared_g2l
+        for idx, sample in enumerate(tqdm(self.data, desc="[shared-subgraph] preparing samples")):
+            self.question_id.append(sample["id"])
+
+            # tokenize question
+            if self.tokenize == "lstm":
+                self.query_texts[idx] = self.tokenizer.tokenize(sample["question"])
+            else:
+                tokens = self.tokenizer.encode_plus(
+                    text=sample["question"],
+                    max_length=self.max_query_word,
+                    pad_to_max_length=True,
+                    return_attention_mask=False,
+                    truncation=True,
+                )
+                self.query_texts[idx] = np.array(tokens["input_ids"])
+
+            # seed entities (question entities)
+            seed_set = set()
+            key_ent = "entities_cid" if "entities_cid" in sample else "entities"
+            for entity in sample.get(key_ent, []) or []:
+                try:
+                    ge = _coerce_entity_id(entity, self.entity2id)
+                except Exception:
+                    continue
+                le = g2l.get(ge)
+                if le is not None:
+                    seed_set.add(int(le))
+            self._shared_seed_local[idx] = sorted(seed_set)
+
+            # answers (global list + local list)
+            answer_list = []
+            answer_local = []
+            if "answers_cid" in sample and sample["answers_cid"] is not None:
+                for answer in sample["answers_cid"]:
+                    try:
+                        ae = _coerce_entity_id(answer, self.entity2id)
+                    except Exception:
+                        continue
+                    answer_list.append(ae)
+                    le = g2l.get(ae)
+                    if le is not None:
+                        answer_local.append(int(le))
+            else:
+                for answer in sample.get("answers", []) or []:
+                    if not isinstance(answer, dict):
+                        continue
+                    keyword = "text" if isinstance(answer.get("kb_id"), int) else "kb_id"
+                    try:
+                        ae = int(self.entity2id[answer[keyword]])
+                    except Exception:
+                        continue
+                    answer_list.append(ae)
+                    le = g2l.get(ae)
+                    if le is not None:
+                        answer_local.append(int(le))
+            self.answer_lists[idx] = answer_list
+            self._shared_answer_local[idx] = answer_local
+
+    # [shared-subgraph]
+    def _shared_build_dense_batch(self, sample_ids):
+        """
+        Build dense matrices only for the current batch:
+          - candidate_entities: (B, |V|)
+          - query_entities: (B, |V|)
+          - seed_distribution: (B, |V|)
+          - answer_dists: (B, |V|)
+        """
+        batch_size = len(sample_ids)
+        max_local_entity = self.max_local_entity
+
+        # NOTE: This is the only unavoidable duplication in shared-subgraph mode:
+        # the model expects per-sample (B, |V|) dense tensors.
+        # [shared-subgraph]
+        candidate_entities = np.tile(np.asarray(self._shared_entities, dtype=np.int64), (batch_size, 1))
+        query_entities = np.zeros((batch_size, max_local_entity), dtype=np.float32)
+        seed_distribution = np.zeros((batch_size, max_local_entity), dtype=np.float32)
+        answer_dists = np.zeros((batch_size, max_local_entity), dtype=np.float32)
+
+        uniform_val = 1.0 / float(max_local_entity) if max_local_entity > 0 else 0.0
+        for bi, sid in enumerate(sample_ids):
+            seeds = self._shared_seed_local[sid] or []
+            for le in seeds:
+                query_entities[bi, le] = 1.0
+            if seeds:
+                seed_distribution[bi, seeds] = 1.0 / float(len(seeds))
+            else:
+                seed_distribution[bi, :] = uniform_val
+
+            ans_local = self._shared_answer_local[sid] or []
+            for le in ans_local:
+                answer_dists[bi, le] = 1.0
+
+        return candidate_entities, query_entities, seed_distribution, answer_dists
 
     def _parse_args(self, config, word2id, relation2id, entity2id):
 
@@ -133,6 +485,21 @@ class BasicDataLoader(object):
         self.id2entity = {i: entity for entity, i in entity2id.items()}
         self.q_type = config['q_type']
         self.enable_policy_expand = bool(config.get("enable_policy_expand", False))
+        # For edge-weight computation toggles in `_build_fact_mat`.
+        # [shared-subgraph]
+        self.normalized_gnn = bool(config.get("normalized_gnn", False))
+        self.norm_rel = bool(config.get("norm_rel", False))
+
+        # Shared subgraph (merged) mode.
+        # [shared-subgraph]
+        self.use_shared_subgraph = bool(config.get("use_shared_subgraph", False))
+        self.shared_subgraph_path = config.get("shared_subgraph_path") or os.path.join(
+            config["data_folder"], "subgraph.json"
+        )
+        if self.use_shared_subgraph and self.enable_policy_expand:
+            # PSE expands *per-sample* subgraphs; shared-subgraph mode ignores per-sample subgraphs.
+            print("[shared-subgraph] enable_policy_expand=True ignored (shared-subgraph mode).")
+            self.enable_policy_expand = False
 
         if self.use_inverse_relation:
             self.num_kb_relation = 2 * len(relation2id)
@@ -610,11 +977,87 @@ class BasicDataLoader(object):
 
         return np.array(head_list, dtype=int),  np.array(rel_list, dtype=int), np.array(tail_list, dtype=int)
 
+    # [shared-subgraph]
+    def _build_fact_mat_shared(self, batch_size: int, fact_dropout: float):
+        """
+        Build the batched edge list for shared-subgraph mode.
+
+        NOTE: The downstream GNN expects a *flattened* graph for (batch_size * |V|) nodes,
+        so we still replicate edge indices per-batch via offsets. We avoid any
+        (num_data x |V|) persistent allocations.
+        """
+        base_heads = self._shared_base_heads
+        base_rels = self._shared_base_rels
+        base_tails = self._shared_base_tails
+
+        num_fact = int(base_heads.shape[0])
+        if num_fact == 0:
+            batch_heads = np.array([], dtype=np.int64)
+            batch_rels = np.array([], dtype=np.int64)
+            batch_tails = np.array([], dtype=np.int64)
+            batch_ids = np.array([], dtype=np.int64)
+            fact_ids = np.array([], dtype=np.int64)
+            weight_list = np.array([], dtype=np.float32)
+            weight_rel_list = np.array([], dtype=np.float32)
+            return batch_heads, batch_rels, batch_tails, batch_ids, fact_ids, weight_list, weight_rel_list
+
+        keep = int(np.floor(num_fact * (1.0 - float(fact_dropout))))
+        keep = max(0, min(num_fact, keep))
+        if keep == num_fact:
+            mask_index = slice(None)
+        else:
+            mask_index = np.random.permutation(num_fact)[:keep]
+
+        kept_heads = base_heads[mask_index]
+        kept_rels = base_rels[mask_index]
+        kept_tails = base_tails[mask_index]
+
+        offsets = (np.arange(batch_size, dtype=np.int64) * int(self.max_local_entity))[:, None]
+        batch_heads = (kept_heads[None, :] + offsets).reshape(-1)
+        batch_tails = (kept_tails[None, :] + offsets).reshape(-1)
+        batch_rels = np.tile(kept_rels, batch_size)
+        batch_ids = np.repeat(np.arange(batch_size, dtype=np.int64), kept_heads.shape[0])
+
+        if self.use_self_loop:
+            ent = np.arange(self.max_local_entity, dtype=np.int64)[None, :] + offsets
+            ent = ent.reshape(-1)
+            rel = np.array([self.num_kb_relation - 1], dtype=np.int64)
+            rel = np.tile(rel, ent.shape[0])
+            ids = np.repeat(np.arange(batch_size, dtype=np.int64), self.max_local_entity)
+            batch_heads = np.append(batch_heads, ent)
+            batch_tails = np.append(batch_tails, ent)
+            batch_rels = np.append(batch_rels, rel)
+            batch_ids = np.append(batch_ids, ids)
+
+        fact_ids = np.arange(batch_heads.shape[0], dtype=np.int64)
+
+        # Weights are used only when normalized_gnn/norm_rel are enabled.
+        if not self.normalized_gnn:
+            weight_list = np.ones(batch_heads.shape[0], dtype=np.float32)
+        else:
+            head_count = Counter(batch_heads.tolist())
+            weight_list = np.asarray([1.0 / head_count[int(h)] for h in batch_heads], dtype=np.float32)
+
+        if not self.norm_rel:
+            weight_rel_list = np.ones(batch_heads.shape[0], dtype=np.float32)
+        else:
+            head_rels_batch = list(zip(batch_heads.tolist(), batch_rels.tolist()))
+            head_rels_count = Counter(head_rels_batch)
+            weight_rel_list = np.asarray(
+                [1.0 / head_rels_count[(int(h), int(r))] for (h, r) in head_rels_batch],
+                dtype=np.float32,
+            )
+
+        return batch_heads, batch_rels, batch_tails, batch_ids, fact_ids, weight_list, weight_rel_list
+
     
     def _build_fact_mat(self, sample_ids, fact_dropout):
         """
         Creates local adj mats that contain entities, relations, and structure.
         """
+        # [shared-subgraph]
+        if getattr(self, "use_shared_subgraph", False):
+            return self._build_fact_mat_shared(len(sample_ids), fact_dropout=fact_dropout)
         batch_heads = np.array([], dtype=int)
         batch_rels = np.array([], dtype=int)
         batch_tails = np.array([], dtype=int)
@@ -747,6 +1190,23 @@ class SingleDataLoader(BasicDataLoader):
         # self.true_sample_ids = ori_sample_ids
         # self.batch_ids = true_batch_id
         true_batch_id = None
+
+        # [shared-subgraph]
+        if getattr(self, "use_shared_subgraph", False):
+            local_entity, query_entities, seed_dist, answer_dist = self._shared_build_dense_batch(sample_ids)
+            q_input = self.deal_q_type(q_type)
+            kb_adj_mats = self._build_fact_mat(sample_ids, fact_dropout=fact_dropout)
+            if iteration == 0:
+                num_fact_base = int(self._shared_base_heads.shape[0])
+                keep = int(np.floor(num_fact_base * (1.0 - float(fact_dropout))))
+                print(
+                    f"[shared-subgraph] split={self.data_type} fact_dropout={fact_dropout} "
+                    f"keep_facts_per_sample={keep}/{num_fact_base} batch_size={len(sample_ids)}"
+                )
+            if test:
+                return local_entity, query_entities, kb_adj_mats, q_input, seed_dist, true_batch_id, answer_dist, self.answer_lists[sample_ids]
+            return local_entity, query_entities, kb_adj_mats, q_input, seed_dist, true_batch_id, answer_dist
+
         seed_dist = self.seed_distribution[sample_ids]
         q_input = self.deal_q_type(q_type)
         kb_adj_mats = self._build_fact_mat(sample_ids, fact_dropout=fact_dropout)
