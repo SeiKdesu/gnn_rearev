@@ -178,17 +178,23 @@ def main() -> int:
     else:
         unique_total, unique_present, mention_total, mention_present = _count_with_subgraph_json(args.subgraph, id_counts)
 
+    unique_pct = (100.0 * unique_present / unique_total) if unique_total else 0.0
+    mention_pct = (100.0 * mention_present / mention_total) if mention_total else 0.0
+    unmapped_pct = (100.0 * unmapped / total_mentions_raw) if total_mentions_raw else 0.0
+
     dt = time.time() - t0
     print(f"train_answer_mentions_total: {total_mentions_raw}")
     print(f"train_answer_mentions_unmapped: {unmapped}")
+    print(f"train_answer_mentions_unmapped_pct: {unmapped_pct:.2f}")
     print(f"train_answer_entities_unique: {unique_total}")
     print(f"merged_subgraph_answer_entities_unique: {unique_present}")
+    print(f"merged_subgraph_answer_entities_unique_pct: {unique_pct:.2f}")
     print(f"train_answer_mentions_mapped: {mention_total}")
     print(f"merged_subgraph_answer_mentions_mapped: {mention_present}")
+    print(f"merged_subgraph_answer_mentions_mapped_pct: {mention_pct:.2f}")
     print(f"elapsed_sec: {dt:.2f}", file=sys.stderr)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
