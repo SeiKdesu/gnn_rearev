@@ -126,7 +126,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Merge all CWQ train.json subgraphs (JSONL) into one big subgraph.json."
     )
-    ap.add_argument("--train", default="data/CWQ/train.json", help="Path to CWQ train.json (JSONL)")
+    ap.add_argument(
+        "--input",
+        "--train",
+        dest="train",
+        default="data/CWQ/train.json",
+        help="Path to CWQ *.json (JSONL). (Kept --train for backward compatibility.)",
+    )
     ap.add_argument("--out", default="data/CWQ/subgraph.json", help="Output path for merged subgraph.json")
     ap.add_argument(
         "--db",
