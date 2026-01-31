@@ -44,6 +44,7 @@ class BasicDataLoader(object):
         index = 0
 
         if getattr(self, "use_merged_subgraph", False):
+            self._set_merged_subgraph_db_path_for_split(config, data_type)
             self._open_merged_subgraph_db()
 
         with open(data_file) as f_in:
@@ -631,6 +632,27 @@ class BasicDataLoader(object):
         conn.execute("CREATE TEMP TABLE IF NOT EXISTS frontier (id INTEGER PRIMARY KEY) WITHOUT ROWID;")
         conn.commit()
         self._merged_db_conn = conn
+
+    def _set_merged_subgraph_db_path_for_split(self, config, data_type: str) -> None:
+        """
+        Allow different merged subgraph DBs per split (train/dev/test).
+        """
+        key_map = {
+            "train": "merged_subgraph_db_train",
+            "dev": "merged_subgraph_db_dev",
+            "test": "merged_subgraph_db_test",
+        }
+        override_key = key_map.get(data_type)
+        db_arg = None
+        if override_key is not None:
+            db_arg = config.get(override_key, None)
+        if not db_arg:
+            db_arg = config.get("merged_subgraph_db", "subgraph_merge.sqlite")
+
+        if os.path.isabs(db_arg):
+            self.merged_subgraph_db_path = db_arg
+        else:
+            self.merged_subgraph_db_path = os.path.join(config["data_folder"], db_arg)
 
     def _extract_subgraph_from_merged(self, seed_entities):
         """

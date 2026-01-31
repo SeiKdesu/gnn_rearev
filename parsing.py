@@ -71,6 +71,24 @@ def add_shared_args(parser):
         type=str,
         help='SQLite DB created by merge_cwq_subgraphs.py (relative to --data_folder unless absolute)',
     )
+    parser.add_argument(
+        '--merged_subgraph_db_train',
+        default=None,
+        type=str,
+        help='Optional: train split DB (relative to --data_folder unless absolute)',
+    )
+    parser.add_argument(
+        '--merged_subgraph_db_dev',
+        default=None,
+        type=str,
+        help='Optional: dev split DB (relative to --data_folder unless absolute)',
+    )
+    parser.add_argument(
+        '--merged_subgraph_db_test',
+        default=None,
+        type=str,
+        help='Optional: test split DB (relative to --data_folder unless absolute)',
+    )
     parser.add_argument('--merged_subgraph_hops', default=2, type=int)
     parser.add_argument('--merged_subgraph_max_entities', default=800, type=int)
     parser.add_argument('--merged_subgraph_max_tuples', default=4000, type=int)
