@@ -21,6 +21,12 @@ def _init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_db_indexes(conn: sqlite3.Connection) -> None:
+    # PK(s,r,o) already supports lookups by s. Add an index for lookups by o.
+    conn.execute("CREATE INDEX IF NOT EXISTS tuples_by_o ON tuples(o, r, s);")
+    conn.commit()
+
+
 def _export_json(conn: sqlite3.Connection, out_path: str) -> None:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
@@ -99,6 +105,9 @@ def merge_subgraphs_jsonl(
             conn.executemany("INSERT OR IGNORE INTO tuples(s, r, o) VALUES (?, ?, ?);", tpl_rows)
             conn.commit()
 
+        print("ensuring db indexes ...", file=sys.stderr)
+        _ensure_db_indexes(conn)
+
         print("exporting merged subgraph ...", file=sys.stderr)
         _export_json(conn, out_json_path)
 
@@ -140,4 +149,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

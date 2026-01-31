@@ -63,6 +63,19 @@ def add_shared_args(parser):
     parser.add_argument('--test_batch_size', default=20, type=int)
     parser.add_argument('--q_type', default='seq', type=str)
 
+    # Optional: override per-sample subgraphs using a merged subgraph DB (CWQ)
+    parser.add_argument('--use_merged_subgraph', default=False, type=bool_flag)
+    parser.add_argument(
+        '--merged_subgraph_db',
+        default='subgraph_merge.sqlite',
+        type=str,
+        help='SQLite DB created by merge_cwq_subgraphs.py (relative to --data_folder unless absolute)',
+    )
+    parser.add_argument('--merged_subgraph_hops', default=2, type=int)
+    parser.add_argument('--merged_subgraph_max_entities', default=800, type=int)
+    parser.add_argument('--merged_subgraph_max_tuples', default=4000, type=int)
+    parser.add_argument('--merged_subgraph_sql_limit', default=20000, type=int)
+
 
 
 def add_parse_args(parser):

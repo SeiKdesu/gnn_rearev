@@ -7,6 +7,7 @@ from collections import Counter
 import random
 import warnings
 import pickle
+import sqlite3
 warnings.filterwarnings("ignore")
 from modules.question_encoding.tokenizers import LSTMTokenizer#, BERTTokenizer
 from transformers import AutoTokenizer
@@ -42,14 +43,24 @@ class BasicDataLoader(object):
         skip_index = set()
         index = 0
 
+        if getattr(self, "use_merged_subgraph", False):
+            self._open_merged_subgraph_db()
+
         with open(data_file) as f_in:
             for line in tqdm(f_in):
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
                 line = json.loads(line)
-                
+
                 if len(line['entities']) == 0:
                     skip_index.add(index)
                     continue
+
+                if getattr(self, "use_merged_subgraph", False):
+                    seed_key = 'entities_cid' if 'entities_cid' in line else 'entities'
+                    seed_entities = [self._to_global_entity_id(e) for e in line.get(seed_key, [])]
+                    seed_entities = [e for e in seed_entities if isinstance(e, int)]
+                    line['subgraph'] = self._extract_subgraph_from_merged(seed_entities)
+
                 self.data.append(line)
                 self.max_facts = max(self.max_facts, 2 * len(line['subgraph']['tuples']))
                 index += 1
@@ -92,6 +103,18 @@ class BasicDataLoader(object):
         """
         self.data_eff = config['data_eff']
         self.data_name = config['name']
+        self.use_merged_subgraph = config.get('use_merged_subgraph', False)
+        if self.use_merged_subgraph:
+            db_arg = config.get('merged_subgraph_db', 'subgraph_merge.sqlite')
+            if os.path.isabs(db_arg):
+                self.merged_subgraph_db_path = db_arg
+            else:
+                self.merged_subgraph_db_path = os.path.join(config['data_folder'], db_arg)
+            self.merged_subgraph_hops = int(config.get('merged_subgraph_hops', 2))
+            self.merged_subgraph_max_entities = int(config.get('merged_subgraph_max_entities', 800))
+            self.merged_subgraph_max_tuples = int(config.get('merged_subgraph_max_tuples', 4000))
+            self.merged_subgraph_sql_limit = int(config.get('merged_subgraph_sql_limit', 20000))
+            self._merged_db_conn = None
 
         if 'use_inverse_relation' in config:
             self.use_inverse_relation = config['use_inverse_relation']
@@ -573,6 +596,118 @@ class BasicDataLoader(object):
             except:
                 if entity_global_id not in g2l:
                     g2l[entity_global_id] = len(g2l)
+
+    def _to_global_entity_id(self, entity_val):
+        """
+        Convert various entity representations in the dataset into the global integer ID.
+        CWQ typically stores entity IDs as ints already; other datasets may store strings.
+        """
+        try:
+            if isinstance(entity_val, dict) and 'text' in entity_val:
+                return self.entity2id[entity_val['text']]
+            return self.entity2id[entity_val]
+        except Exception:
+            try:
+                return int(entity_val)
+            except Exception:
+                return entity_val
+
+    def _open_merged_subgraph_db(self):
+        if getattr(self, "_merged_db_conn", None) is not None:
+            return
+        if not os.path.exists(self.merged_subgraph_db_path):
+            raise FileNotFoundError(
+                f"merged_subgraph_db not found: {self.merged_subgraph_db_path} "
+                f"(run merge_cwq_subgraphs.py first, or pass --merged_subgraph_db)"
+            )
+
+        conn = sqlite3.connect(self.merged_subgraph_db_path)
+        conn.execute("PRAGMA journal_mode=OFF;")
+        conn.execute("PRAGMA synchronous=OFF;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        conn.execute("PRAGMA cache_size=-200000;")  # ~200MB
+        conn.execute("PRAGMA mmap_size=268435456;")  # 256MB
+        conn.execute("CREATE INDEX IF NOT EXISTS tuples_by_o ON tuples(o, r, s);")
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS frontier (id INTEGER PRIMARY KEY) WITHOUT ROWID;")
+        conn.commit()
+        self._merged_db_conn = conn
+
+    def _extract_subgraph_from_merged(self, seed_entities):
+        """
+        Build a per-sample subgraph by k-hop expansion over the merged subgraph DB.
+        Uses caps to keep local graphs bounded.
+        """
+        if not seed_entities:
+            return {"entities": [], "tuples": []}
+        self._open_merged_subgraph_db()
+        conn = self._merged_db_conn
+
+        max_entities = self.merged_subgraph_max_entities
+        max_tuples = self.merged_subgraph_max_tuples
+        hops = self.merged_subgraph_hops
+        sql_limit = self.merged_subgraph_sql_limit
+
+        visited = set(seed_entities)
+        tuples = set()
+
+        conn.execute("DELETE FROM frontier;")
+        conn.executemany("INSERT OR IGNORE INTO frontier(id) VALUES (?);", [(int(e),) for e in visited])
+
+        for _ in range(hops):
+            if len(tuples) >= max_tuples:
+                break
+            remaining = max_tuples - len(tuples)
+            lim = remaining if remaining < sql_limit else sql_limit
+            if lim <= 0:
+                break
+
+            new_nodes = []
+            new_nodes_set = set()
+
+            # Fetch edges incident to the current frontier (both outgoing and incoming).
+            cur = conn.execute(
+                "SELECT t.s, t.r, t.o FROM frontier f JOIN tuples t ON t.s = f.id "
+                "UNION ALL "
+                "SELECT t.s, t.r, t.o FROM frontier f JOIN tuples t ON t.o = f.id "
+                "LIMIT ?;",
+                (int(lim),),
+            )
+            for s, r, o in cur:
+                s = int(s)
+                r = int(r)
+                o = int(o)
+                if (s, r, o) in tuples:
+                    continue
+
+                missing = []
+                if s not in visited:
+                    missing.append(s)
+                if o not in visited:
+                    missing.append(o)
+                if missing and len(visited) + len(missing) > max_entities:
+                    continue
+
+                for m in missing:
+                    visited.add(m)
+                    if m not in new_nodes_set:
+                        new_nodes_set.add(m)
+                        new_nodes.append(m)
+
+                tuples.add((s, r, o))
+                if len(tuples) >= max_tuples:
+                    break
+
+            if not new_nodes:
+                break
+
+            conn.execute("DELETE FROM frontier;")
+            conn.executemany("INSERT OR IGNORE INTO frontier(id) VALUES (?);", [(int(e),) for e in new_nodes])
+
+        # Ensure determinism
+        return {
+            "entities": sorted(visited),
+            "tuples": [list(t) for t in sorted(tuples)],
+        }
 
     def deal_q_type(self, q_type=None):
         sample_ids = self.sample_ids
