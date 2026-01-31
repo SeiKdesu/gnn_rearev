@@ -181,6 +181,7 @@ def main() -> int:
         edge_covs = []
         answer_hit = 0
         answer_total = 0
+        next_progress_ts = time.time()
         line_count = 0
 
         out_f = open(args.out_jsonl, "w", encoding="utf-8") if args.out_jsonl else None
@@ -253,9 +254,31 @@ def main() -> int:
                     line_count += 1
                     if args.max_lines and line_count >= args.max_lines:
                         break
+                    now = time.time()
                     if args.log_every and line_count % args.log_every == 0:
-                        dt = time.time() - t0
-                        print(f"[{line_count:,} lines] elapsed={dt:,.1f}s", file=sys.stderr)
+                        dt = now - t0
+                        speed = (line_count / dt) if dt > 0 else 0.0
+                        eta = ((args.max_lines - line_count) / speed) if (args.max_lines and speed > 0) else None
+                        if eta is None:
+                            print(
+                                f"[{line_count:,} lines] elapsed={dt:,.1f}s speed={speed:.2f} lines/s",
+                                file=sys.stderr,
+                            )
+                        else:
+                            print(
+                                f"[{line_count:,}/{args.max_lines:,} lines] elapsed={dt:,.1f}s speed={speed:.2f} lines/s eta={eta:,.1f}s",
+                                file=sys.stderr,
+                            )
+                        next_progress_ts = now
+                    elif now - next_progress_ts >= 10.0:
+                        # heartbeat even if log_every is large
+                        dt = now - t0
+                        speed = (line_count / dt) if dt > 0 else 0.0
+                        print(
+                            f"[{line_count:,} lines] elapsed={dt:,.1f}s speed={speed:.2f} lines/s",
+                            file=sys.stderr,
+                        )
+                        next_progress_ts = now
         finally:
             if out_f is not None:
                 out_f.close()
@@ -300,4 +323,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
