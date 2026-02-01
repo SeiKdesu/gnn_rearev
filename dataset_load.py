@@ -16,6 +16,133 @@ import time
 import os
 
 
+def _scan_json_value_end(s: str, start: int) -> int:
+    """
+    Return end position (exclusive) of the JSON value starting at `start`.
+    Works for objects/arrays/strings/numbers/true/false/null.
+    """
+    n = len(s)
+    if start >= n:
+        return start
+    ch = s[start]
+
+    if ch == '"':
+        i = start + 1
+        esc = False
+        while i < n:
+            c = s[i]
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                return i + 1
+            i += 1
+        raise ValueError("unterminated JSON string")
+
+    if ch in "{[":
+        open_ch, close_ch = ("{", "}") if ch == "{" else ("[", "]")
+        depth = 0
+        i = start
+        in_str = False
+        esc = False
+        while i < n:
+            c = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                i += 1
+                continue
+
+            if c == '"':
+                in_str = True
+            elif c == open_ch:
+                depth += 1
+            elif c == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            i += 1
+        raise ValueError("unterminated JSON container")
+
+    # number / true / false / null: scan until comma or object end
+    i = start
+    while i < n and s[i] not in ",}":
+        i += 1
+    return i
+
+
+def _strip_top_level_key_json_line(line: str, key: str) -> str:
+    """
+    Remove a top-level key from a JSON object line without fully parsing (fast path).
+    Used to skip parsing huge 'subgraph' fields when we will replace them anyway.
+    """
+    key_token = '"' + key + '"'
+    n = len(line)
+    i = 0
+    in_str = False
+    esc = False
+    while i < n:
+        c = line[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+
+        if c == '"':
+            if line.startswith(key_token, i):
+                j = i + len(key_token)
+                while j < n and line[j].isspace():
+                    j += 1
+                if j >= n or line[j] != ":":
+                    in_str = True
+                    i += 1
+                    continue
+
+                k = j + 1
+                while k < n and line[k].isspace():
+                    k += 1
+                val_end = _scan_json_value_end(line, k)
+
+                # trailing comma (only remove if key is first)
+                t = val_end
+                while t < n and line[t].isspace():
+                    t += 1
+                has_trailing_comma = t < n and line[t] == ","
+
+                # preceding comma (remove if key is not first)
+                p = i - 1
+                while p >= 0 and line[p].isspace():
+                    p -= 1
+                has_preceding_comma = p >= 0 and line[p] == ","
+
+                if has_preceding_comma:
+                    remove_start = p
+                    remove_end = val_end  # keep trailing comma if any
+                else:
+                    remove_start = i
+                    remove_end = (t + 1) if has_trailing_comma else val_end
+
+                return line[:remove_start] + line[remove_end:]
+
+            in_str = True
+            i += 1
+            continue
+
+        i += 1
+
+    return line
+
+
 class BasicDataLoader(object):
     """ 
     Basic Dataloader contains all the functions to read questions and KGs from json files and
@@ -34,8 +161,18 @@ class BasicDataLoader(object):
         """
         Loads lines (questions + KG subgraphs) from json files.
         """
-        
-        data_file = config['data_folder'] + data_type + ".json"
+
+        override_key = {
+            "train": "data_file_train",
+            "dev": "data_file_dev",
+            "test": "data_file_test",
+        }.get(data_type)
+        override_path = config.get(override_key) if override_key else None
+        if override_path:
+            data_file = override_path if os.path.isabs(override_path) else os.path.join(config["data_folder"], override_path)
+        else:
+            data_file = os.path.join(config["data_folder"], f"{data_type}.json")
+
         self.data_file = data_file
         print('loading data from', data_file)
         self.data_type = data_type
@@ -48,10 +185,12 @@ class BasicDataLoader(object):
             self._open_merged_subgraph_db()
 
         with open(data_file) as f_in:
-            for line in tqdm(f_in):
+            for raw_line in tqdm(f_in):
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
-                line = json.loads(line)
-
+                if getattr(self, "use_merged_subgraph", False):
+                    raw_line = _strip_top_level_key_json_line(raw_line, "subgraph")
+                line = json.loads(raw_line)
+                
                 if len(line['entities']) == 0:
                     skip_index.add(index)
                     continue
@@ -84,15 +223,16 @@ class BasicDataLoader(object):
             self.max_facts = self.max_facts + self.max_local_entity
 
         self.question_id = []
-        self.candidate_entities = np.full((self.num_data, self.max_local_entity), len(self.entity2id), dtype=int)
+        self.candidate_entities = np.full(
+            (self.num_data, self.max_local_entity),
+            len(self.entity2id),
+            dtype=np.int32,
+        )
         self.kb_adj_mats = np.empty(self.num_data, dtype=object)
-        self.q_adj_mats = np.empty(self.num_data, dtype=object)
-        self.kb_fact_rels = np.full((self.num_data, self.max_facts), self.num_kb_relation, dtype=int)
-        self.query_entities = np.zeros((self.num_data, self.max_local_entity), dtype=float)
-        self.seed_list = np.empty(self.num_data, dtype=object)
-        self.seed_distribution = np.zeros((self.num_data, self.max_local_entity), dtype=float)
+        self.query_entities = np.zeros((self.num_data, self.max_local_entity), dtype=np.float32)
+        self.seed_distribution = np.zeros((self.num_data, self.max_local_entity), dtype=np.float32)
         # self.query_texts = np.full((self.num_data, self.max_query_word), len(self.word2id), dtype=int)
-        self.answer_dists = np.zeros((self.num_data, self.max_local_entity), dtype=float)
+        self.answer_dists = np.zeros((self.num_data, self.max_local_entity), dtype=np.float32)
         self.answer_lists = np.empty(self.num_data, dtype=object)
 
         self._prepare_data()
@@ -127,6 +267,7 @@ class BasicDataLoader(object):
             self.use_self_loop = False
 
         self.rel_word_emb = config['relation_word_emb']
+        self.normalized_gnn = config.get('normalized_gnn', False)
         #self.num_step = config['num_step']
         self.max_local_entity = 0
         self.max_relevant_doc = 0
@@ -268,7 +409,6 @@ class BasicDataLoader(object):
                 seed_list.append(local_ent)
                 tp_set.add(local_ent)
             
-            self.seed_list[next_id] = seed_list
             num_query_entity[next_id] = len(tp_set)
             for global_entity, local_entity in g2l.items():
                 if self.data_name != 'cwq':
@@ -307,12 +447,10 @@ class BasicDataLoader(object):
                 head_list.append(head)
                 rel_list.append(rel)
                 tail_list.append(tail)
-                self.kb_fact_rels[next_id, i] = rel
                 if self.use_inverse_relation:
                     head_list.append(tail)
                     rel_list.append(rel + len(self.relation2id))
                     tail_list.append(head)
-                    self.kb_fact_rels[next_id, i] = rel + len(self.relation2id)
                 
             if len(tp_set) > 0:
                 for local_ent in tp_set:
@@ -498,56 +636,72 @@ class BasicDataLoader(object):
         """
         Creates local adj mats that contain entities, relations, and structure.
         """
-        batch_heads = np.array([], dtype=int)
-        batch_rels = np.array([], dtype=int)
-        batch_tails = np.array([], dtype=int)
-        batch_ids = np.array([], dtype=int)
-        #print(sample_ids)
-        for i, sample_id in enumerate(sample_ids):
-            index_bias = i * self.max_local_entity
-            if self.data_eff:
-                head_list, rel_list, tail_list = self.create_kb_adj_mats(sample_id) #kb_adj_mats[sample_id]
-            else:
-                (head_list, rel_list, tail_list) = self.kb_adj_mats[sample_id]
-            num_fact = len(head_list)
-            num_keep_fact = int(np.floor(num_fact * (1 - fact_dropout)))
-            mask_index = np.random.permutation(num_fact)[: num_keep_fact]
+        heads_parts = []
+        rels_parts = []
+        tails_parts = []
+        ids_parts = []
 
-            real_head_list = head_list[mask_index] + index_bias
-            real_tail_list = tail_list[mask_index] + index_bias
-            real_rel_list = rel_list[mask_index]
-            batch_heads = np.append(batch_heads, real_head_list)
-            batch_rels = np.append(batch_rels, real_rel_list)
-            batch_tails = np.append(batch_tails, real_tail_list)
-            batch_ids = np.append(batch_ids, np.full(len(mask_index), i, dtype=int))
+        max_local_entity = self.max_local_entity
+        num_relation = self.num_kb_relation
+
+        # Fast path: if no dropout, avoid costly permutations.
+        use_dropout = fact_dropout is not None and fact_dropout > 0.0
+
+        for i, sample_id in enumerate(sample_ids):
+            index_bias = i * max_local_entity
+            if self.data_eff:
+                head_arr, rel_arr, tail_arr = self.create_kb_adj_mats(sample_id)
+            else:
+                head_arr, rel_arr, tail_arr = self.kb_adj_mats[sample_id]
+
+            if use_dropout and len(head_arr) > 0:
+                num_fact = len(head_arr)
+                num_keep_fact = int(np.floor(num_fact * (1 - fact_dropout)))
+                if num_keep_fact < num_fact:
+                    mask_index = np.random.choice(num_fact, size=num_keep_fact, replace=False)
+                    head_arr = head_arr[mask_index]
+                    rel_arr = rel_arr[mask_index]
+                    tail_arr = tail_arr[mask_index]
+
+            if len(head_arr) > 0:
+                heads_parts.append(head_arr + index_bias)
+                rels_parts.append(rel_arr)
+                tails_parts.append(tail_arr + index_bias)
+                ids_parts.append(np.full(len(head_arr), i, dtype=int))
+
             if self.use_self_loop:
                 num_ent_now = len(self.global2local_entity_maps[sample_id])
-                ent_array = np.array(range(num_ent_now), dtype=int) + index_bias
-                rel_array = np.array([self.num_kb_relation - 1] * num_ent_now, dtype=int)
-                batch_heads = np.append(batch_heads, ent_array)
-                batch_tails = np.append(batch_tails, ent_array)
-                batch_rels = np.append(batch_rels, rel_array)
-                batch_ids = np.append(batch_ids, np.full(num_ent_now, i, dtype=int))
-        fact_ids = np.array(range(len(batch_heads)), dtype=int)
-        head_rels_ids = zip(batch_heads, batch_rels)
-        head_count = Counter(batch_heads)
-        # tail_count = Counter(batch_tails)
-        weight_list = [1.0 / head_count[head] for head in batch_heads]
+                if num_ent_now > 0:
+                    ent_array = np.arange(num_ent_now, dtype=int) + index_bias
+                    rel_array = np.full(num_ent_now, num_relation - 1, dtype=int)
+                    heads_parts.append(ent_array)
+                    rels_parts.append(rel_array)
+                    tails_parts.append(ent_array)
+                    ids_parts.append(np.full(num_ent_now, i, dtype=int))
 
-        
-        head_rels_batch = list(zip(batch_heads, batch_rels))
-        #print(head_rels_batch)
-        head_rels_count = Counter(head_rels_batch)
-        weight_rel_list = [1.0 / head_rels_count[(h,r)] for (h,r) in head_rels_batch]
+        if heads_parts:
+            batch_heads = np.concatenate(heads_parts).astype(int, copy=False)
+            batch_rels = np.concatenate(rels_parts).astype(int, copy=False)
+            batch_tails = np.concatenate(tails_parts).astype(int, copy=False)
+            batch_ids = np.concatenate(ids_parts).astype(int, copy=False)
+        else:
+            batch_heads = np.array([], dtype=int)
+            batch_rels = np.array([], dtype=int)
+            batch_tails = np.array([], dtype=int)
+            batch_ids = np.array([], dtype=int)
 
-        #print(head_rels_count)
+        fact_ids = np.arange(len(batch_heads), dtype=int)
 
-        # tail_count = Counter(batch_tails)
+        if getattr(self, "normalized_gnn", False) and len(batch_heads) > 0:
+            max_nodes = len(sample_ids) * max_local_entity
+            head_counts = np.bincount(batch_heads, minlength=max_nodes).astype(np.float32)
+            weight_list = (1.0 / head_counts[batch_heads]).astype(np.float32)
+        else:
+            weight_list = None
 
-        # entity2fact_index = torch.LongTensor([batch_heads, fact_ids])
-        # entity2fact_val = torch.FloatTensor(weight_list)
-        # entity2fact_mat = torch.sparse.FloatTensor(entity2fact_index, entity2fact_val, torch.Size(
-        #     [len(sample_ids) * self.max_local_entity, len(batch_heads)]))
+        # Not used by current models (kept for interface compatibility)
+        weight_rel_list = None
+
         return batch_heads, batch_rels, batch_tails, batch_ids, fact_ids, weight_list, weight_rel_list
 
 
@@ -727,8 +881,8 @@ class BasicDataLoader(object):
 
         # Ensure determinism
         return {
-            "entities": sorted(visited),
-            "tuples": [list(t) for t in sorted(tuples)],
+            "entities": list(visited),
+            "tuples": list(tuples),
         }
 
     def deal_q_type(self, q_type=None):
