@@ -4,12 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-DATA_DIR="${DATA_DIR:-data/CWQ}"
-DATA_DIR="${DATA_DIR%/}"
-
-MODE="${MODE:-undirected}" # undirected|directed|both
-ENTITIES_TXT="${ENTITIES_TXT:-$DATA_DIR/entities.txt}"
-ENTITIES_SQLITE="${ENTITIES_SQLITE:-$DATA_DIR/entities_index.sqlite}"
+# CWQ fixed settings (no env/args needed)
+DATA_DIR="data/CWQ"
+MODE="undirected" # undirected|directed|both
+ENTITIES_TXT="$DATA_DIR/entities.txt"
+ENTITIES_SQLITE="$DATA_DIR/entities_index.sqlite"
 
 pick_file() {
   local base="$1"
@@ -60,4 +59,3 @@ python analyze_khop_seed_to_answer_reachability.py \
   --entities-txt "$ENTITIES_TXT" \
   --entities-sqlite "$ENTITIES_SQLITE" \
   --mode "$MODE"
-
