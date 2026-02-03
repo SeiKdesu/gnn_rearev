@@ -150,6 +150,8 @@ class BasicDataLoader(object):
     """
 
     def __init__(self, config, word2id, relation2id, entity2id, tokenize, data_type="train"):
+        # Keep config for streaming mode / split-specific settings.
+        self.config = config
         self.tokenize = tokenize
         self._parse_args(config, word2id, relation2id, entity2id)
         self._load_file(config, data_type)
@@ -176,6 +178,15 @@ class BasicDataLoader(object):
         self.data_file = data_file
         print('loading data from', data_file)
         self.data_type = data_type
+
+        if getattr(self, "stream_data", False):
+            if self.data_eff:
+                print("WARNING: --stream_data forces --data_eff False (subgraphs are not kept in memory).")
+                self.data_eff = False
+            self._scan_file_stats(config, data_type, data_file)
+            self.data = None
+            return
+
         self.data = []
         skip_index = set()
         index = 0
@@ -190,7 +201,7 @@ class BasicDataLoader(object):
                 if getattr(self, "use_merged_subgraph", False):
                     raw_line = _strip_top_level_key_json_line(raw_line, "subgraph")
                 line = json.loads(raw_line)
-                
+
                 if len(line['entities']) == 0:
                     skip_index.add(index)
                     continue
@@ -210,11 +221,64 @@ class BasicDataLoader(object):
         self.num_data = len(self.data)
         self.batches = np.arange(self.num_data)
 
+    def _scan_file_stats(self, config, data_type: str, data_file: str) -> None:
+        """
+        Low-RAM pre-scan: count examples and compute max sizes without keeping JSON objects.
+        """
+        max_train = int(config.get("max_train", 200000))
+        kept = 0
+        max_query_words = 0
+        max_local_entity = 0
+        max_facts = 0
+
+        # If we will overwrite subgraphs from merged DB, use caps for allocation.
+        use_merged = getattr(self, "use_merged_subgraph", False)
+        if use_merged:
+            max_local_entity = int(getattr(self, "merged_subgraph_max_entities", 800))
+            max_facts = 2 * int(getattr(self, "merged_subgraph_max_tuples", 4000))
+
+        with open(data_file) as f_in:
+            for raw_line in tqdm(f_in):
+                if kept == max_train and data_type == "train":
+                    break
+                if use_merged:
+                    raw_line = _strip_top_level_key_json_line(raw_line, "subgraph")
+                obj = json.loads(raw_line)
+
+                if len(obj.get("entities", [])) == 0:
+                    continue
+
+                q = obj.get("question", "")
+                max_query_words = max(max_query_words, len(q.split(" ")))
+
+                if not use_merged:
+                    g2l = dict()
+                    seed_key = "entities_cid" if "entities_cid" in obj else "entities"
+                    self._add_entity_to_map(self.entity2id, obj.get(seed_key, []) or [], g2l)
+                    sg = obj.get("subgraph") or {}
+                    self._add_entity_to_map(self.entity2id, sg.get("entities") or [], g2l)
+                    max_local_entity = max(max_local_entity, len(g2l))
+                    max_facts = max(max_facts, 2 * len(sg.get("tuples") or []))
+
+                kept += 1
+
+        self.num_data = kept
+        self.batches = np.arange(self.num_data)
+        self.max_facts = max_facts
+        self._stream_max_query_words = max_query_words
+        self.max_local_entity = max_local_entity
+
+        print(f"[stream_data] num_data={self.num_data} max_local_entity={self.max_local_entity} max_facts={self.max_facts}")
+
     def _load_data(self):
 
         """
         Creates mappings between global entity ids and local entity ids that are used during GNN updates.
         """
+
+        if getattr(self, "stream_data", False):
+            self._load_data_streaming()
+            return
 
         print('converting global to local entity index ...')
         self.global2local_entity_maps = self._build_global2local_entity_maps()
@@ -237,6 +301,221 @@ class BasicDataLoader(object):
 
         self._prepare_data()
 
+    def _load_data_streaming(self) -> None:
+        """
+        Low-RAM loader: stream JSONL twice and build numpy arrays without keeping full JSON objects.
+        Requires data_eff == False (enforced in _load_file).
+        """
+        config = self.config
+
+        if self.use_self_loop:
+            self.max_facts = self.max_facts + self.max_local_entity
+
+        # Use pre-scanned max words
+        max_count = int(getattr(self, "_stream_max_query_words", 0))
+
+        if self.rel_word_emb:
+            self.build_rel_words(self.tokenize)
+        else:
+            self.rel_texts = None
+            self.rel_texts_inv = None
+            self.ent_texts = None
+
+        self.max_query_word = max_count
+        if self.tokenize == 'lstm':
+            self.num_word = len(self.word2id)
+            self.tokenizer = LSTMTokenizer(self.word2id, self.max_query_word)
+            self.query_texts = np.full((self.num_data, self.max_query_word), self.num_word, dtype=np.int32)
+        else:
+            if self.tokenize == 'bert':
+                tokenizer_name = 'bert-base-uncased'
+            elif self.tokenize == 'roberta':
+                tokenizer_name = 'roberta-base'
+            elif self.tokenize == 'sbert':
+                tokenizer_name = 'sentence-transformers/all-MiniLM-L6-v2'
+            elif self.tokenize == 'sbert2':
+                tokenizer_name = 'sentence-transformers/all-mpnet-base-v2'
+            elif self.tokenize == 't5':
+                tokenizer_name = 't5-small'
+            elif self.tokenize == 'simcse':
+                tokenizer_name = 'princeton-nlp/sup-simcse-bert-base-uncased'
+            elif self.tokenize == 'relbert':
+                tokenizer_name = 'pretrained_lms/sr-simbert/'
+            else:
+                tokenizer_name = 'bert-base-uncased'
+
+            self.max_query_word = max_count + 2
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+            self.num_word = self.tokenizer.convert_tokens_to_ids(self.tokenizer.pad_token)
+            self.query_texts = np.full((self.num_data, self.max_query_word), self.num_word, dtype=np.int32)
+
+        self.question_id = []
+        self.candidate_entities = np.full(
+            (self.num_data, self.max_local_entity),
+            len(self.entity2id),
+            dtype=np.int32,
+        )
+        self.kb_adj_mats = np.empty(self.num_data, dtype=object)
+        self.query_entities = np.zeros((self.num_data, self.max_local_entity), dtype=np.float32)
+        self.seed_distribution = np.zeros((self.num_data, self.max_local_entity), dtype=np.float32)
+        self.answer_dists = np.zeros((self.num_data, self.max_local_entity), dtype=np.float32)
+        self.answer_lists = np.empty(self.num_data, dtype=object)
+        self.local_entity_counts = np.zeros(self.num_data, dtype=np.int32)
+
+        # Second pass: fill arrays
+        max_train = int(config.get("max_train", 200000))
+        data_type = getattr(self, "data_type", "train")
+        use_merged = getattr(self, "use_merged_subgraph", False)
+        if use_merged:
+            # ensure correct split DB is set
+            self._set_merged_subgraph_db_path_for_split(config, data_type)
+            self._open_merged_subgraph_db()
+
+        next_id = 0
+        num_query_entity = {}
+        with open(self.data_file) as f_in:
+            for raw_line in tqdm(f_in):
+                if next_id == max_train and data_type == "train":
+                    break
+                if use_merged:
+                    raw_line = _strip_top_level_key_json_line(raw_line, "subgraph")
+                sample = json.loads(raw_line)
+
+                if len(sample.get("entities", [])) == 0:
+                    continue
+
+                if use_merged:
+                    seed_key = 'entities_cid' if 'entities_cid' in sample else 'entities'
+                    seed_entities = [self._to_global_entity_id(e) for e in sample.get(seed_key, [])]
+                    seed_entities = [e for e in seed_entities if isinstance(e, int)]
+                    sample['subgraph'] = self._extract_subgraph_from_merged(seed_entities)
+
+                self.question_id.append(sample.get("id"))
+
+                # build g2l map for this sample
+                g2l = {}
+                seed_key = 'entities_cid' if 'entities_cid' in sample else 'entities'
+                self._add_entity_to_map(self.entity2id, sample.get(seed_key, []) or [], g2l)
+                self._add_entity_to_map(self.entity2id, (sample.get('subgraph') or {}).get('entities') or [], g2l)
+
+                self.local_entity_counts[next_id] = len(g2l)
+                tp_set = set()
+
+                for entity in sample.get(seed_key, []) or []:
+                    global_entity = self._to_global_entity_id(entity)
+                    if global_entity not in g2l:
+                        continue
+                    local_ent = g2l[global_entity]
+                    self.query_entities[next_id, local_ent] = 1.0
+                    tp_set.add(local_ent)
+
+                num_query_entity[next_id] = len(tp_set)
+
+                for global_entity, local_entity in g2l.items():
+                    if self.data_name != 'cwq':
+                        if local_entity not in tp_set:
+                            self.candidate_entities[next_id, local_entity] = global_entity
+                    else:
+                        self.candidate_entities[next_id, local_entity] = global_entity
+
+                # relations in local KB
+                head_list = []
+                rel_list = []
+                tail_list = []
+                for tpl in (sample.get('subgraph') or {}).get('tuples') or []:
+                    sbj, rel, obj = tpl
+                    try:
+                        head = g2l[int(sbj)]
+                        tail = g2l[int(obj)]
+                    except Exception:
+                        continue
+                    try:
+                        rel_id = int(rel)
+                    except Exception:
+                        try:
+                            rel_id = self.relation2id[rel]
+                        except Exception:
+                            continue
+                    head_list.append(head)
+                    rel_list.append(rel_id)
+                    tail_list.append(tail)
+                    if self.use_inverse_relation:
+                        head_list.append(tail)
+                        rel_list.append(rel_id + len(self.relation2id))
+                        tail_list.append(head)
+
+                if len(tp_set) > 0:
+                    for local_ent in tp_set:
+                        self.seed_distribution[next_id, local_ent] = 1.0 / len(tp_set)
+                else:
+                    if len(g2l) > 0:
+                        self.seed_distribution[next_id, : len(g2l)] = 1.0 / len(g2l)
+
+                # tokenize question
+                if self.tokenize == 'lstm':
+                    self.query_texts[next_id] = self.tokenizer.tokenize(sample.get('question', ''))
+                else:
+                    tokens = self.tokenizer.encode_plus(
+                        text=sample.get('question', ''),
+                        max_length=self.max_query_word,
+                        pad_to_max_length=True,
+                        return_attention_mask=False,
+                        truncation=True,
+                    )
+                    self.query_texts[next_id] = np.array(tokens['input_ids'], dtype=np.int32)
+
+                # construct distribution for answers
+                answer_list = []
+                if 'answers_cid' in sample:
+                    for answer_ent in sample.get('answers_cid') or []:
+                        answer_list.append(answer_ent)
+                        if answer_ent in g2l:
+                            self.answer_dists[next_id, g2l[answer_ent]] = 1.0
+                else:
+                    for answer in sample.get('answers') or []:
+                        keyword = 'text' if type(answer.get('kb_id')) == int else 'kb_id'
+                        if keyword not in answer:
+                            continue
+                        if answer[keyword] not in self.entity2id:
+                            continue
+                        answer_ent = self.entity2id[answer[keyword]]
+                        answer_list.append(answer_ent)
+                        if answer_ent in g2l:
+                            self.answer_dists[next_id, g2l[answer_ent]] = 1.0
+
+                self.answer_lists[next_id] = answer_list
+
+                # store adjacency for fast batches (use compact dtypes)
+                self.kb_adj_mats[next_id] = (
+                    np.asarray(head_list, dtype=np.uint16),
+                    np.asarray(rel_list, dtype=np.uint16),
+                    np.asarray(tail_list, dtype=np.uint16),
+                )
+
+                next_id += 1
+
+        # In case we stopped early (max_train), trim arrays.
+        self.num_data = next_id
+        self.batches = np.arange(self.num_data)
+        self.candidate_entities = self.candidate_entities[: self.num_data]
+        self.query_entities = self.query_entities[: self.num_data]
+        self.seed_distribution = self.seed_distribution[: self.num_data]
+        self.answer_dists = self.answer_dists[: self.num_data]
+        self.answer_lists = self.answer_lists[: self.num_data]
+        self.query_texts = self.query_texts[: self.num_data]
+        self.kb_adj_mats = self.kb_adj_mats[: self.num_data]
+        self.local_entity_counts = self.local_entity_counts[: self.num_data]
+
+        num_no_query_ent = sum(1 for v in num_query_entity.values() if v == 0)
+        num_one_query_ent = sum(1 for v in num_query_entity.values() if v == 1)
+        num_multiple_ent = sum(1 for v in num_query_entity.values() if v > 1)
+        print(
+            "{} cases in total, {} cases without query entity, {} cases with single query entity,"
+            " {} cases with multiple query entities".format(
+                self.num_data, num_no_query_ent, num_one_query_ent, num_multiple_ent
+            )
+        )
+
     def _parse_args(self, config, word2id, relation2id, entity2id):
 
         """
@@ -244,6 +523,7 @@ class BasicDataLoader(object):
         """
         self.data_eff = config['data_eff']
         self.data_name = config['name']
+        self.stream_data = config.get('stream_data', False)
         self.use_merged_subgraph = config.get('use_merged_subgraph', False)
         if self.use_merged_subgraph:
             db_arg = config.get('merged_subgraph_db', 'subgraph_merge.sqlite')
@@ -670,7 +950,10 @@ class BasicDataLoader(object):
                 ids_parts.append(np.full(len(head_arr), i, dtype=int))
 
             if self.use_self_loop:
-                num_ent_now = len(self.global2local_entity_maps[sample_id])
+                if hasattr(self, "local_entity_counts") and self.local_entity_counts is not None:
+                    num_ent_now = int(self.local_entity_counts[sample_id])
+                else:
+                    num_ent_now = len(self.global2local_entity_maps[sample_id])
                 if num_ent_now > 0:
                     ent_array = np.arange(num_ent_now, dtype=int) + index_bias
                     rel_array = np.full(num_ent_now, num_relation - 1, dtype=int)

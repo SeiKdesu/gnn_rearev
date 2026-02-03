@@ -117,6 +117,12 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
     parser.add_argument('--merged_subgraph_max_entities', default=800 if default is None else default, type=int)
     parser.add_argument('--merged_subgraph_max_tuples', default=4000 if default is None else default, type=int)
     parser.add_argument('--merged_subgraph_sql_limit', default=20000 if default is None else default, type=int)
+    parser.add_argument(
+        '--stream_data',
+        default=False if default is None else default,
+        type=bool_flag,
+        help='Low-RAM mode: do not keep full JSON objects in memory; stream and build tensors/arrays',
+    )
 
 
 
