@@ -362,6 +362,9 @@ class BasicDataLoader(object):
         self.answer_lists = np.empty(self.num_data, dtype=object)
         self.local_entity_counts = np.zeros(self.num_data, dtype=np.int32)
 
+        node_dtype = np.uint16 if self.max_local_entity <= np.iinfo(np.uint16).max else np.int32
+        rel_dtype = np.uint16 if self.num_kb_relation <= np.iinfo(np.uint16).max else np.int32
+
         # Second pass: fill arrays
         max_train = int(config.get("max_train", 200000))
         data_type = getattr(self, "data_type", "train")
@@ -487,9 +490,9 @@ class BasicDataLoader(object):
 
                 # store adjacency for fast batches (use compact dtypes)
                 self.kb_adj_mats[next_id] = (
-                    np.asarray(head_list, dtype=np.uint16),
-                    np.asarray(rel_list, dtype=np.uint16),
-                    np.asarray(tail_list, dtype=np.uint16),
+                    np.asarray(head_list, dtype=node_dtype),
+                    np.asarray(rel_list, dtype=rel_dtype),
+                    np.asarray(tail_list, dtype=node_dtype),
                 )
 
                 next_id += 1
@@ -944,6 +947,10 @@ class BasicDataLoader(object):
                     tail_arr = tail_arr[mask_index]
 
             if len(head_arr) > 0:
+                # Stored adjacencies may use compact dtypes (e.g., uint16). Upcast before adding index_bias.
+                head_arr = np.asarray(head_arr, dtype=np.int32)
+                rel_arr = np.asarray(rel_arr, dtype=np.int32)
+                tail_arr = np.asarray(tail_arr, dtype=np.int32)
                 heads_parts.append(head_arr + index_bias)
                 rels_parts.append(rel_arr)
                 tails_parts.append(tail_arr + index_bias)
