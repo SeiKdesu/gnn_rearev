@@ -62,9 +62,6 @@ class Trainer_KBQA(object):
         #         self.args, len(self.entity2id), self.num_kb_relation, self.num_word
         #     )
 
-        if args["relation_word_emb"]:
-            # self.model.use_rel_texts(self.rel_texts, self.rel_texts_inv)
-            self.model.encode_rel_texts(self.rel_texts, self.rel_texts_inv)
         total_params = sum(p.numel() for p in self.model.parameters())
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
@@ -80,6 +77,7 @@ class Trainer_KBQA(object):
             device=self.device,
         )
         self.load_pretrain()
+        self._refresh_relation_features()
         self.optim_def()
 
         self.num_relation = self.num_kb_relation
@@ -132,7 +130,16 @@ class Trainer_KBQA(object):
             print("Load ckpt from", ckpt_path)
             self.load_ckpt(ckpt_path)
 
+    def _refresh_relation_features(self):
+        if not self.args.get("relation_word_emb", False):
+            return
+        was_training = self.model.training
+        self.model.encode_rel_texts(self.rel_texts, self.rel_texts_inv)
+        if was_training:
+            self.model.train()
+
     def evaluate(self, data, test_batch_size=20, write_info=False):
+        self._refresh_relation_features()
         return self.evaluator.evaluate(data, test_batch_size, write_info)
 
     def train(self, start_epoch, end_epoch):
@@ -177,12 +184,7 @@ class Trainer_KBQA(object):
                         eval_f1, eval_h1, eval_em
                     )
                 )
-                wandb.log({
-                    "Epoch": epoch + 1,
-                    "Val F1": eval_f1,
-                    "Val H1": eval_h1,
-                    "Val EM": eval_em
-                })
+               
                 # eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 # self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
                 do_test = False
@@ -207,6 +209,12 @@ class Trainer_KBQA(object):
                         eval_f1, eval_h1, eval_em
                     )
                 )
+                wandb.log({
+                    "Epoch": epoch + 1,
+                    "Val F1": eval_f1,
+                    "Val H1": eval_h1,
+                    "Val EM": eval_em
+                })
                 # if do_test:
                 #     eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 #     self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
@@ -392,5 +400,5 @@ class Trainer_KBQA(object):
         print(f"[VERIFY] max_abs_diff={max_abs_diff:.3e} at {max_key}")
         assert max_abs_diff == 0.0, "Loaded weights do not exactly match checkpoint!"
         model.to(self.device)
+        self._refresh_relation_features()
         print("Loaded checkpoint with strict=True (after filtering).")
-
