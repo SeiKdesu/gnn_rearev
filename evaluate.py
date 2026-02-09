@@ -101,6 +101,7 @@ class Evaluator:
 
         self.id2relation = id2relation
         self.file_write = None
+        self.wrong_file_write = None
         self.device = device
 
     def write_info(self, valid_data, tp_list, num_step):
@@ -138,11 +139,12 @@ class Evaluator:
         return obj_list
 
     def evaluate(self, valid_data, test_batch_size=20, write_info=False):
-        write_info = True
         self.model.eval()
         self.count = 0
         eps = self.eps
         id2entity = self.id2entity
+        dump_wrong = bool(self.args.get("dump_wrong", False))
+        dump_wrong_topk = int(self.args.get("dump_wrong_topk", 20))
         eval_loss, eval_acc, eval_max_acc = [], [], []
         f1s, hits, ems,  precisions, recalls = [], [], [], [], []
         valid_data.reset_batches(is_sequential=True)
@@ -151,6 +153,13 @@ class Evaluator:
             filename = os.path.join(self.args['checkpoint_dir'],
                                     "{}_test.info".format(self.args['experiment_name']))
             self.file_write = open(filename, "w")
+        if dump_wrong and self.wrong_file_write is None:
+            split = getattr(valid_data, "data_type", "data")
+            filename = os.path.join(
+                self.args["checkpoint_dir"],
+                "{}_{}_wrong.jsonl".format(self.args["experiment_name"], split),
+            )
+            self.wrong_file_write = open(filename, "w")
         case_ct = {}
         max_local_entity = valid_data.max_local_entity
         ignore_prob = (1 - eps) / max_local_entity
@@ -170,6 +179,10 @@ class Evaluator:
                 obj_list = self.write_info(valid_data, tp_list, self.model.num_iter)
                 # pred_sum = torch.sum(pred_dist, dim=1)
                 # print(pred_sum)
+            if dump_wrong:
+                question_list = valid_data.get_quest()
+                relation_ins_history = getattr(self.model, "relation_ins_history", None)
+                gnn_dist_history = getattr(self.model, "gnn_dist_history", None)
             candidate_entities = torch.from_numpy(local_entity).type('torch.LongTensor')
             true_answers = torch.from_numpy(answer_dist).type('torch.FloatTensor')
             query_entities = torch.from_numpy(query_entities).type('torch.LongTensor')
@@ -217,6 +230,59 @@ class Evaluator:
                     tp_obj['em'] = em
                     tp_obj['cand'] = retrived
                     self.file_write.write(json.dumps(tp_obj) + "\n")
+                if dump_wrong and hit == 0.0 and self.wrong_file_write is not None:
+                    pred_local = int(pred[batch_id].item())
+                    pred_global = candidates[pred_local] if 0 <= pred_local < len(candidates) else None
+                    pred_prob = probs[pred_local] if 0 <= pred_local < len(probs) else None
+
+                    debug = {
+                        "question": question_list[batch_id] if batch_id < len(question_list) else None,
+                        "answers": ans,
+                        "pred_argmax": {
+                            "local_idx": pred_local,
+                            "global_id": pred_global,
+                            "prob": pred_prob,
+                        },
+                        "metrics": {
+                            "precision": precision,
+                            "recall": recall,
+                            "f1": f1,
+                            "hit": hit,
+                            "em": em,
+                        },
+                        "num_iter": int(getattr(self.model, "num_iter", 0)),
+                        "num_gnn": int(getattr(self.model, "num_gnn", 0)),
+                        "num_ins": int(getattr(self.model, "num_ins", 0)),
+                        "entity_dim": int(getattr(self.model, "entity_dim", 0)),
+                        "candidates": candidates,
+                        "seed_mask": seed_entities,
+                        "reasoning": [],
+                    }
+
+                    if relation_ins_history is not None and gnn_dist_history is not None:
+                        num_iter = min(len(relation_ins_history), len(gnn_dist_history))
+                        for t in range(num_iter):
+                            ins = relation_ins_history[t][batch_id].detach().float().cpu().tolist()
+                            hop_debug = {"iter": t + 1, "instruction": ins, "gnn": []}
+                            for j, dist_t in enumerate(gnn_dist_history[t]):
+                                dist_vec = dist_t[batch_id].detach().float().cpu()
+                                dist_list = dist_vec.tolist()
+
+                                k = min(dump_wrong_topk, dist_vec.numel())
+                                topk_vals, topk_idx = torch.topk(dist_vec, k=k)
+                                topk = []
+                                for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
+                                    gid = candidates[idx] if 0 <= idx < len(candidates) else None
+                                    if gid == pad_ent_id:
+                                        continue
+                                    topk.append({"local_idx": idx, "global_id": gid, "prob": val})
+
+                                hop_debug["gnn"].append(
+                                    {"hop": j + 1, "dist": dist_list, "topk": topk}
+                                )
+                            debug["reasoning"].append(hop_debug)
+
+                    self.wrong_file_write.write(json.dumps(debug) + "\n")
                 case_ct.setdefault(case, 0)
                 case_ct[case] += 1
                 f1s.append(f1)
@@ -237,7 +303,9 @@ class Evaluator:
         if write_info:
             self.file_write.close()
             self.file_write = None
+        if dump_wrong and self.wrong_file_write is not None:
+            self.wrong_file_write.close()
+            self.wrong_file_write = None
         return np.mean(f1s), np.mean(hits), np.mean(ems)
-
 
 

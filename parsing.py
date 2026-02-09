@@ -86,6 +86,18 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
     parser.add_argument('--eps', default=0.95 if default is None else default, type=float) # threshold for f1
     parser.add_argument('--test_batch_size', default=20 if default is None else default, type=int)
     parser.add_argument('--q_type', default='seq' if default is None else default, type=str)
+    parser.add_argument(
+        '--dump_wrong',
+        default=False if default is None else default,
+        type=bool_flag,
+        help='During evaluation, write per-hop debug info for wrong predictions to checkpoint_dir.',
+    )
+    parser.add_argument(
+        '--dump_wrong_topk',
+        default=20 if default is None else default,
+        type=int,
+        help='Top-k candidates to include in wrong-case debug output.',
+    )
 
     # Optional: override per-sample subgraphs using a merged subgraph DB (CWQ)
     parser.add_argument('--use_merged_subgraph', default=False if default is None else default, type=bool_flag)
