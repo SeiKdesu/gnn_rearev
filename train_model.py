@@ -4,6 +4,8 @@ import numpy as np
 import os, math
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import ExponentialLR
 import torch.optim as optim
 
@@ -36,7 +38,23 @@ class Trainer_KBQA(object):
         self.warmup_epoch = args["warmup_epoch"]
         self.learning_rate = self.args["lr"]
         self.test_batch_size = args["test_batch_size"]
-        self.device = torch.device("cuda" if args["use_cuda"] else "cpu")
+        self.distributed = bool(args.get("distributed", False))
+        self.rank = int(args.get("rank", 0))
+        self.world_size = int(args.get("world_size", 1))
+        self.local_rank = int(args.get("local_rank", 0))
+        self.is_main_process = self.rank == 0
+
+        device_str = args.get("device", None)
+        if device_str is not None:
+            self.device = torch.device(device_str)
+        else:
+            self.device = torch.device("cuda" if args["use_cuda"] else "cpu")
+
+        if self.distributed and not dist.is_initialized():
+            raise RuntimeError(
+                "Distributed training requested but torch.distributed is not initialized. "
+                "Launch with `torchrun --nproc_per_node=2 ...` or `python main.py ... --num_gpus 2`."
+            )
         self.reset_time = 0
         self.load_data(args, args["lm"])
 
@@ -62,13 +80,27 @@ class Trainer_KBQA(object):
         #         self.args, len(self.entity2id), self.num_kb_relation, self.num_word
         #     )
 
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-
-        print(f"Total parameters: {total_params}")
-        print(f"Trainable parameters: {trainable_params}")
+        if self.is_main_process:
+            total_params = sum(p.numel() for p in self.model.parameters())
+            trainable_params = sum(
+                p.numel() for p in self.model.parameters() if p.requires_grad
+            )
+            print(f"Total parameters: {total_params}")
+            print(f"Trainable parameters: {trainable_params}")
         
         self.model.to(self.device)
+
+        if self.distributed:
+            if self.device.type == "cuda":
+                self.model = DDP(
+                    self.model,
+                    device_ids=[self.local_rank],
+                    output_device=self.local_rank,
+                    find_unused_parameters=True,
+                )
+            else:
+                self.model = DDP(self.model, find_unused_parameters=True)
+
         self.evaluator = Evaluator(
             args=args,
             model=self.model,
@@ -147,74 +179,93 @@ class Trainer_KBQA(object):
         eval_every = self.args["eval_every"]
         # eval_acc = inference(self.model, self.valid_data, self.entity2id, self.args)
         # self.evaluate(self.test_data, self.test_batch_size)
-        print("Start Training------------------")
+        if self.is_main_process:
+            print("Start Training------------------")
         for epoch in range(start_epoch, end_epoch + 1):
             st = time.time()
-            loss, extras, h1_list_all, f1_list_all = self.train_epoch()
+            loss, extras, train_h1, train_f1 = self.train_epoch(epoch)
 
             if self.decay_rate > 0:
                 self.scheduler.step()
 
-            self.logger.info(
-                "Epoch: {}, loss : {:.4f}, time: {}".format(
-                    epoch + 1, loss, time.time() - st
-                )
-            )
-            self.logger.info(
-                "Training h1 : {:.4f}, f1 : {:.4f}".format(
-                    np.mean(h1_list_all), np.mean(f1_list_all)
-                )
-            )
-            wandb.log({
-                "Epoch": epoch + 1,
-                "Train Loss": loss,
-                "Train H1": np.mean(h1_list_all),
-                "Train F1": np.mean(f1_list_all),
-                "Learning Rate": self.optim_model.param_groups[0]['lr']
-            })
-
-            self.save_ckpt(f"{epoch}")
-            if (epoch + 1) % eval_every == 0:
-                eval_f1, eval_h1, eval_em = self.evaluate(
-                    self.valid_data, self.test_batch_size
-                )
-                
+            if self.is_main_process and self.logger is not None:
                 self.logger.info(
-                    "EVAL F1: {:.4f}, H1: {:.4f}, EM {:.4f}".format(
-                        eval_f1, eval_h1, eval_em
+                    "Epoch: {}, loss : {:.4f}, time: {}".format(
+                        epoch + 1, loss, time.time() - st
                     )
                 )
+                self.logger.info(
+                    "Training h1 : {:.4f}, f1 : {:.4f}".format(train_h1, train_f1)
+                )
+
+            if self.is_main_process and wandb.run is not None:
+                wandb.log(
+                    {
+                        "Epoch": epoch + 1,
+                        "Train Loss": float(loss),
+                        "Train H1": float(train_h1),
+                        "Train F1": float(train_f1),
+                        "Learning Rate": float(self.optim_model.param_groups[0]["lr"]),
+                    }
+                )
+
+            if self.is_main_process:
+                self.save_ckpt(f"{epoch}")
+
+            if (epoch + 1) % eval_every == 0:
+                if self.distributed:
+                    dist.barrier()
+                if self.is_main_process:
+                    eval_f1, eval_h1, eval_em = self.evaluate(
+                        self.valid_data, self.test_batch_size
+                    )
+
+                    if self.logger is not None:
+                        self.logger.info(
+                            "EVAL F1: {:.4f}, H1: {:.4f}, EM {:.4f}".format(
+                                eval_f1, eval_h1, eval_em
+                            )
+                        )
                
                 # eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 # self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
                 do_test = False
 
-                if epoch > self.warmup_epoch:
-                    if eval_h1 > self.best_h1:
-                        self.best_h1 = eval_h1
-                        self.save_ckpt("h1")
-                        self.logger.info("BEST EVAL H1: {:.4f}".format(eval_h1))
-                        do_test = True
-                    if eval_f1 > self.best_f1:
-                        self.best_f1 = eval_f1
-                        self.save_ckpt("f1")
-                        self.logger.info("BEST EVAL F1: {:.4f}".format(eval_f1))
-                        do_test = True
+                if self.is_main_process:
+                    if epoch > self.warmup_epoch:
+                        if eval_h1 > self.best_h1:
+                            self.best_h1 = eval_h1
+                            self.save_ckpt("h1")
+                            if self.logger is not None:
+                                self.logger.info("BEST EVAL H1: {:.4f}".format(eval_h1))
+                            do_test = True
+                        if eval_f1 > self.best_f1:
+                            self.best_f1 = eval_f1
+                            self.save_ckpt("f1")
+                            if self.logger is not None:
+                                self.logger.info("BEST EVAL F1: {:.4f}".format(eval_f1))
+                            do_test = True
 
-                eval_f1, eval_h1, eval_em = self.evaluate(
-                    self.test_data, self.test_batch_size
-                )
-                self.logger.info(
-                    "TEST F1: {:.4f}, H1: {:.4f}, EM {:.4f}".format(
-                        eval_f1, eval_h1, eval_em
+                    eval_f1, eval_h1, eval_em = self.evaluate(
+                        self.test_data, self.test_batch_size
                     )
-                )
-                wandb.log({
-                    "Epoch": epoch + 1,
-                    "Val F1": eval_f1,
-                    "Val H1": eval_h1,
-                    "Val EM": eval_em
-                })
+                    if self.logger is not None:
+                        self.logger.info(
+                            "TEST F1: {:.4f}, H1: {:.4f}, EM {:.4f}".format(
+                                eval_f1, eval_h1, eval_em
+                            )
+                        )
+                    if wandb.run is not None:
+                        wandb.log(
+                            {
+                                "Epoch": epoch + 1,
+                                "Val F1": float(eval_f1),
+                                "Val H1": float(eval_h1),
+                                "Val EM": float(eval_em),
+                            }
+                        )
+                if self.distributed:
+                    dist.barrier()
                 # if do_test:
                 #     eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 #     self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
@@ -232,10 +283,14 @@ class Trainer_KBQA(object):
                 # if self.reset_time >= 5:
                 #     self.logger.info('No improvement after 5 evaluation. Early Stopping.')
                 #     break
-        self.save_ckpt("final")
-        self.logger.info("Train Done! Evaluate on testset with saved model")
-        print("End Training------------------")
-        self.evaluate_best()
+        if self.is_main_process:
+            self.save_ckpt("final")
+            if self.logger is not None:
+                self.logger.info("Train Done! Evaluate on testset with saved model")
+            print("End Training------------------")
+            self.evaluate_best()
+        if self.distributed:
+            dist.barrier()
 
     def evaluate_best(self):
         for reason in ["h1", "f1", "final"]:
@@ -314,38 +369,86 @@ class Trainer_KBQA(object):
             )
         )
 
-    def train_epoch(self):
+    def _unwrap_model(self):
+        return self.model.module if hasattr(self.model, "module") else self.model
+
+    def _set_train_batches(self, epoch: int) -> int:
+        """
+        Deterministic shuffling + (optional) DDP sharding.
+        Returns number of samples assigned to this rank.
+        """
+        num_data = int(self.train_data.num_data)
+        rng = np.random.RandomState(int(self.args.get("seed", 0)) + int(epoch))
+        indices = np.arange(num_data, dtype=np.int64)
+        rng.shuffle(indices)
+
+        if not self.distributed or self.world_size <= 1:
+            self.train_data.batches = indices
+            return int(len(indices))
+
+        world_size = int(self.world_size)
+        total_size = int(math.ceil(num_data / world_size) * world_size)
+        if total_size > num_data:
+            pad = indices[: (total_size - num_data)]
+            indices = np.concatenate([indices, pad], axis=0)
+
+        rank_indices = indices[int(self.rank) : total_size : world_size]
+        self.train_data.batches = rank_indices
+        return int(len(rank_indices))
+
+    def train_epoch(self, epoch: int):
         self.model.train()
-        self.train_data.reset_batches(is_sequential=False)
-        losses = []
-        actor_losses = []
-        ent_losses = []
-        num_epoch = math.ceil(self.train_data.num_data / self.args["batch_size"])
-        h1_list_all = []
-        f1_list_all = []
-        for iteration in tqdm(range(num_epoch)):
+        num_samples = self._set_train_batches(epoch)
+
+        loss_sum = 0.0
+        sample_count = 0.0
+        h1_sum = 0.0
+        f1_sum = 0.0
+        metric_count = 0.0
+
+        num_iter = int(math.ceil(num_samples / self.args["batch_size"])) if num_samples > 0 else 0
+
+        for iteration in tqdm(range(num_iter), disable=not self.is_main_process):
             batch = self.train_data.get_batch(
                 iteration, self.args["batch_size"], self.args["fact_drop"]
             )
 
             self.optim_model.zero_grad()
             loss, _, _, tp_list = self.model(batch, training=True)
-            # if tp_list is not None:
             h1_list, f1_list = tp_list
-            h1_list_all.extend(h1_list)
-            f1_list_all.extend(f1_list)
+
+            batch_sz = int(batch[0].shape[0])
+            loss_sum += float(loss.item()) * batch_sz
+            sample_count += float(batch_sz)
+            h1_sum += float(np.sum(h1_list))
+            f1_sum += float(np.sum(f1_list))
+            metric_count += float(len(h1_list))
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 [param for name, param in self.model.named_parameters()],
                 self.args["gradient_clip"],
             )
             self.optim_model.step()
-            losses.append(loss.item())
+
+        if self.distributed:
+            stats = torch.tensor(
+                [loss_sum, sample_count, h1_sum, metric_count, f1_sum, metric_count],
+                device=self.device,
+                dtype=torch.float64,
+            )
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            loss_sum, sample_count, h1_sum, metric_count, f1_sum, _ = stats.tolist()
+
+        loss_mean = (loss_sum / sample_count) if sample_count > 0 else 0.0
+        h1_mean = (h1_sum / metric_count) if metric_count > 0 else 0.0
+        f1_mean = (f1_sum / metric_count) if metric_count > 0 else 0.0
+
         extras = [0, 0]
-        return np.mean(losses), extras, h1_list_all, f1_list_all
+        return loss_mean, extras, h1_mean, f1_mean
 
     def save_ckpt(self, reason="h1"):
-        model = self.model
+        model = self._unwrap_model()
         checkpoint = {"model_state_dict": model.state_dict()}
         model_name = os.path.join(
             self.args["checkpoint_dir"],
@@ -358,12 +461,18 @@ class Trainer_KBQA(object):
         checkpoint = torch.load(filename, map_location="cpu")
         sd = checkpoint["model_state_dict"]
 
-        model = self.model
+        model = self._unwrap_model()
         model_sd = model.state_dict()
 
-        # (任意) DDP/DataParallelの "module." が付いてる場合に剥がす
-        if any(k.startswith("module.") for k in sd.keys()):
+        # DDP/DataParallel checkpoints may prefix keys with "module."
+        if any(k.startswith("module.") for k in sd.keys()) and not any(
+            k.startswith("module.") for k in model_sd.keys()
+        ):
             sd = {k.replace("module.", "", 1): v for k, v in sd.items()}
+        elif (not any(k.startswith("module.") for k in sd.keys())) and any(
+            k.startswith("module.") for k in model_sd.keys()
+        ):
+            sd = {"module." + k: v for k, v in sd.items()}
 
         # 1) モデルに存在するキーだけ残す
         filtered = {k: v for k, v in sd.items() if k in model_sd}

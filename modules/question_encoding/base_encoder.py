@@ -7,14 +7,18 @@ VERY_NEG_NUMBER = -100000000000
 
 class BaseInstruction(torch.nn.Module):
 
-    def __init__(self, args, constraint):
+    def __init__(self, args, constraint=False):
         super(BaseInstruction, self).__init__()
-        self.constraint = constraint
+        self.constraint = bool(constraint)
         self._parse_args(args)
         self.share_module_def()
 
     def _parse_args(self, args):
-        self.device = torch.device('cuda' if args['use_cuda'] else 'cpu')
+        device_str = args.get("device", None)
+        if device_str is not None:
+            self.device = torch.device(device_str)
+        else:
+            self.device = torch.device("cuda" if args["use_cuda"] else "cpu")
         
 
         # self.share_encoder = args['share_encoder']
@@ -112,4 +116,3 @@ class BaseInstruction(torch.nn.Module):
             self.attn_list.append(attn_weight)
             self.relational_ins = relational_ins
         return self.instructions, self.attn_list
-

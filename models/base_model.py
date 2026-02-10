@@ -38,7 +38,11 @@ class BaseModel(torch.nn.Module):
         
         #self.share_module_def()
         #self.model_name = args['model_name'].lower()
-        self.device = torch.device('cuda' if args['use_cuda'] else 'cpu')
+        device_str = args.get("device", None)
+        if device_str is not None:
+            self.device = torch.device(device_str)
+        else:
+            self.device = torch.device("cuda" if args["use_cuda"] else "cpu")
        
         print("Entity: {}, Relation: {}, Word: {}".format(num_entity, num_relation, num_word))
 

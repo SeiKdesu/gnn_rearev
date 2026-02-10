@@ -1132,9 +1132,11 @@ class BasicDataLoader(object):
 
             # Fetch edges incident to the current frontier (both outgoing and incoming).
             cur = conn.execute(
-                "SELECT t.s, t.r, t.o FROM frontier f JOIN tuples t ON t.s = f.id "
+                "SELECT s, r, o FROM ("
+                "SELECT t.s AS s, t.r AS r, t.o AS o FROM frontier f JOIN tuples t ON t.s = f.id "
                 "UNION ALL "
-                "SELECT t.s, t.r, t.o FROM frontier f JOIN tuples t ON t.o = f.id "
+                "SELECT t.s AS s, t.r AS r, t.o AS o FROM frontier f JOIN tuples t ON t.o = f.id "
+                ") ORDER BY s, r, o "
                 "LIMIT ?;",
                 (int(lim),),
             )
@@ -1171,8 +1173,8 @@ class BasicDataLoader(object):
 
         # Ensure determinism
         return {
-            "entities": list(visited),
-            "tuples": list(tuples),
+            "entities": sorted(visited),
+            "tuples": sorted(tuples),
         }
 
     def deal_q_type(self, q_type=None):

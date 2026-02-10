@@ -136,6 +136,33 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
         help='Low-RAM mode: do not keep full JSON objects in memory; stream and build tensors/arrays',
     )
 
+    # ---- Multi-GPU / Distributed (single-node) ----
+    parser.add_argument(
+        '--num_gpus',
+        default=1 if default is None else default,
+        type=int,
+        help='Number of GPUs to use. If >1, run DistributedDataParallel (single-node).',
+    )
+    parser.add_argument(
+        '--dist_backend',
+        default='nccl' if default is None else default,
+        type=str,
+        choices=['nccl', 'gloo'],
+        help='torch.distributed backend.',
+    )
+    parser.add_argument(
+        '--master_addr',
+        default='127.0.0.1' if default is None else default,
+        type=str,
+        help='MASTER_ADDR for distributed (used when --num_gpus > 1 without torchrun).',
+    )
+    parser.add_argument(
+        '--master_port',
+        default=29500 if default is None else default,
+        type=int,
+        help='MASTER_PORT for distributed (used when --num_gpus > 1 without torchrun).',
+    )
+
 
 
 def add_parse_args(parser):

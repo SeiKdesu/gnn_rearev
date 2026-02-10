@@ -12,7 +12,11 @@ class BaseGNNLayer(torch.nn.Module):
         super(BaseGNNLayer, self).__init__()
         self.num_relation = num_relation
         self.num_entity = num_entity
-        self.device = torch.device('cuda' if args['use_cuda'] else 'cpu')
+        device_str = args.get("device", None)
+        if device_str is not None:
+            self.device = torch.device(device_str)
+        else:
+            self.device = torch.device("cuda" if args["use_cuda"] else "cpu")
         self.normalized_gnn = args['normalized_gnn']
 
 
