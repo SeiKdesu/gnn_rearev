@@ -254,7 +254,7 @@ class Evaluator:
                         "num_gnn": int(getattr(self.model, "num_gnn", 0)),
                         "num_ins": int(getattr(self.model, "num_ins", 0)),
                         "entity_dim": int(getattr(self.model, "entity_dim", 0)),
-                        "candidates": candidates,
+                        # "candidates": candidates,
                         "seed_mask": seed_entities,
                         "reasoning": [],
                     }
