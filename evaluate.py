@@ -231,11 +231,23 @@ class Evaluator:
                     tp_obj['cand'] = retrived
                     self.file_write.write(json.dumps(tp_obj) + "\n")
                 if dump_wrong and hit == 0.0 and self.wrong_file_write is not None:
+                    ex_id = None
+                    try:
+                        if hasattr(valid_data, "sample_ids") and hasattr(valid_data, "question_id"):
+                            sample_ids = valid_data.sample_ids
+                            if sample_ids is not None and batch_id < len(sample_ids):
+                                ds_idx = int(sample_ids[batch_id])
+                                if 0 <= ds_idx < len(valid_data.question_id):
+                                    ex_id = valid_data.question_id[ds_idx]
+                    except Exception:
+                        ex_id = None
+
                     pred_local = int(pred[batch_id].item())
                     pred_global = candidates[pred_local] if 0 <= pred_local < len(candidates) else None
                     pred_prob = probs[pred_local] if 0 <= pred_local < len(probs) else None
 
                     debug = {
+                        "id": ex_id,
                         "question": question_list[batch_id] if batch_id < len(question_list) else None,
                         "answers": ans,
                         "pred_argmax": {
@@ -307,5 +319,4 @@ class Evaluator:
             self.wrong_file_write.close()
             self.wrong_file_write = None
         return np.mean(f1s), np.mean(hits), np.mean(ems)
-
 
