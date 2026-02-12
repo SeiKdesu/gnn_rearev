@@ -33,6 +33,30 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
         type=str,
         help='Override test file (relative to --data_folder unless absolute)',
     )
+    parser.add_argument(
+        '--switch_epoch',
+        default=default,
+        type=int,
+        help='Epoch index to start using *_switch files (0-based). Example: 20 switches after 20 epochs (starts at epoch 21).',
+    )
+    parser.add_argument(
+        '--data_file_train_switch',
+        default=default,
+        type=str,
+        help='Train file to use after switch_epoch (relative to --data_folder unless absolute)',
+    )
+    parser.add_argument(
+        '--data_file_dev_switch',
+        default=default,
+        type=str,
+        help='Dev file to use after switch_epoch (relative to --data_folder unless absolute)',
+    )
+    parser.add_argument(
+        '--data_file_test_switch',
+        default=default,
+        type=str,
+        help='Test file to use after switch_epoch (relative to --data_folder unless absolute)',
+    )
 
     # embeddings
     parser.add_argument('--word2id', default='vocab.txt' if default is None else default, type=str)

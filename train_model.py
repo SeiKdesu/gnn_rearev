@@ -38,6 +38,8 @@ class Trainer_KBQA(object):
         self.test_batch_size = args["test_batch_size"]
         self.device = torch.device("cuda" if args["use_cuda"] else "cpu")
         self.reset_time = 0
+        self._data_switched = False
+        self._data_switch_epoch = args.get("switch_epoch", None)
         self.load_data(args, args["lm"])
 
         if "decay_rate" in args:
@@ -99,6 +101,72 @@ class Trainer_KBQA(object):
                 else:
                     setattr(self, k, args["data_folder"] + v)
 
+    def _log_info(self, msg: str) -> None:
+        print(msg)
+        if self.logger is not None:
+            self.logger.info(msg)
+
+    def _switch_dataset_if_needed(self, epoch: int) -> None:
+        if self._data_switched:
+            return
+        switch_epoch = self._data_switch_epoch
+        if switch_epoch is None:
+            return
+        try:
+            switch_epoch = int(switch_epoch)
+        except Exception:
+            self._log_info(f"[data switch] invalid switch_epoch={switch_epoch!r}; skipping.")
+            self._data_switched = True
+            return
+        if switch_epoch < 0:
+            return
+        if epoch < switch_epoch:
+            return
+
+        switch_keys = {
+            "train": "data_file_train_switch",
+            "dev": "data_file_dev_switch",
+            "test": "data_file_test_switch",
+        }
+        provided = []
+        for split, key in switch_keys.items():
+            val = self.args.get(key)
+            if val is not None:
+                self.args[f"data_file_{split}"] = val
+                provided.append((split, val))
+
+        if not provided:
+            self._log_info("[data switch] switch_epoch set but no *_switch files provided; skipping.")
+            self._data_switched = True
+            return
+
+        prev_counts = (self.num_entity, self.num_kb_relation, self.num_word)
+        old_train, old_valid, old_test = self.train_data, self.valid_data, self.test_data
+        self.load_data(self.args, self.args["lm"])
+        del old_train, old_valid, old_test
+
+        new_counts = (self.num_entity, self.num_kb_relation, self.num_word)
+        if new_counts != prev_counts:
+            raise RuntimeError(
+                "Switching datasets changed (num_entity, num_relation, num_word). "
+                f"before={prev_counts}, after={new_counts}. "
+                "This is not supported without rebuilding the model."
+            )
+
+        self.evaluator = Evaluator(
+            args=self.args,
+            model=self.model,
+            entity2id=self.entity2id,
+            relation2id=self.relation2id,
+            device=self.device,
+        )
+        self._refresh_relation_features()
+        self._data_switched = True
+        provided_str = ", ".join([f"{s}={v}" for s, v in provided])
+        self._log_info(
+            f"[data switch] epoch {epoch + 1}: switched data files -> {provided_str}"
+        )
+
     def optim_def(self):
 
         trainable = filter(lambda p: p.requires_grad, self.model.parameters())
@@ -149,6 +217,7 @@ class Trainer_KBQA(object):
         # self.evaluate(self.test_data, self.test_batch_size)
         print("Start Training------------------")
         for epoch in range(start_epoch, end_epoch + 1):
+            self._switch_dataset_if_needed(epoch)
             st = time.time()
             loss, extras, h1_list_all, f1_list_all = self.train_epoch()
 
