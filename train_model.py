@@ -146,11 +146,23 @@ class Trainer_KBQA(object):
         del old_train, old_valid, old_test
 
         new_counts = (self.num_entity, self.num_kb_relation, self.num_word)
-        if new_counts != prev_counts:
+        if new_counts[:2] != prev_counts[:2]:
             raise RuntimeError(
-                "Switching datasets changed (num_entity, num_relation, num_word). "
-                f"before={prev_counts}, after={new_counts}. "
+                "Switching datasets changed (num_entity, num_relation). "
+                f"before={prev_counts[:2]}, after={new_counts[:2]}. "
                 "This is not supported without rebuilding the model."
+            )
+        lm_name = self.args.get("lm", "lstm")
+        if lm_name == "lstm" and new_counts[2] != prev_counts[2]:
+            raise RuntimeError(
+                "Switching datasets changed num_word under LSTM. "
+                f"before={prev_counts[2]}, after={new_counts[2]}. "
+                "This is not supported without rebuilding the model."
+            )
+        if lm_name != "lstm" and new_counts[2] != prev_counts[2]:
+            self._log_info(
+                f"[data switch] num_word changed {prev_counts[2]} -> {new_counts[2]} (lm={lm_name}); "
+                "ignored for non-LSTM."
             )
 
         self.evaluator = Evaluator(
