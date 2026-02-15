@@ -200,6 +200,12 @@ def create_parser_rearev(parser):
     parser.add_argument('--norm_rel', action='store_true')
     parser.add_argument('--data_eff', action='store_true')
     parser.add_argument('--pos_emb', action='store_true')
+    parser.add_argument('--use_beta_crossattn', default=False, type=bool_flag)
+    parser.add_argument('--beta_num_heads', default=8, type=int)
+    parser.add_argument('--beta_lambda', default=1.0, type=float)
+    parser.add_argument('--beta_dropout', default=0.0, type=float)
+    parser.add_argument('--beta_fusion_hidden', default=None, type=int)
+    parser.add_argument('--debug_beta_topk', default=0, type=int)
     add_shared_args(parser, suppress_defaults=True)
 
 
