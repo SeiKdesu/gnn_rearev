@@ -89,7 +89,7 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
     parser.add_argument('--warmup_epoch', default=0 if default is None else default, type=int)
     parser.add_argument('--fact_scale', default=3 if default is None else default, type=int)
     parser.add_argument('--eval_every', default=2 if default is None else default, type=int)
-    parser.add_argument('--batch_size', default=20 if default is None else default, type=int)
+    parser.add_argument('--batch_size', default=4 if default is None else default, type=int)
     parser.add_argument('--gradient_clip', default=1.0 if default is None else default, type=float)
     parser.add_argument('--lr', default=0.0005 if default is None else default, type=float)
     parser.add_argument('--decay_rate', default=0.0 if default is None else default, type=float)
