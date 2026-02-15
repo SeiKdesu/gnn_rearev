@@ -33,6 +33,15 @@ class ReasonGNNLayer(BaseGNNLayer):
         assert self.alg == 'bfs'
         self.linear_dropout = args['linear_dropout']
         self.linear_drop = nn.Dropout(p=self.linear_dropout)
+        self.instruction_attn_heads = self._select_attn_heads(args, entity_dim)
+        self.instruction_fuse = nn.TransformerEncoderLayer(
+            d_model=entity_dim,
+            nhead=self.instruction_attn_heads,
+            dim_feedforward=entity_dim * 4,
+            dropout=self.linear_dropout,
+            activation='gelu',
+            batch_first=True,
+        )
         for i in range(self.num_gnn):
             self.add_module('rel_linear' + str(i), nn.Linear(in_features=entity_dim, out_features=entity_dim))
             if self.alg == 'bfs':
@@ -42,6 +51,23 @@ class ReasonGNNLayer(BaseGNNLayer):
                 self.add_module('pos_emb' + str(i), nn.Embedding(self.num_relation, entity_dim))
                 self.add_module('pos_emb_inv' + str(i), nn.Embedding(self.num_relation, entity_dim))
         self.lin_m =  nn.Linear(in_features=(self.num_ins)*entity_dim, out_features=entity_dim)
+
+    def _select_attn_heads(self, args, entity_dim):
+        heads = args.get('instruction_attn_heads')
+        if heads is not None:
+            if entity_dim % heads != 0:
+                raise ValueError('instruction_attn_heads must divide entity_dim')
+            return heads
+        max_heads = min(8, entity_dim)
+        for h in range(max_heads, 0, -1):
+            if entity_dim % h == 0:
+                return h
+        return 1
+
+    def _instruction_fuse(self, fact_query, rel_input):
+        seq = torch.stack((fact_query, rel_input), dim=1)
+        fused = self.instruction_fuse(seq)
+        return fused[:, 1, :]
 
     def init_reason(self, local_entity, kb_adj_mat, local_entity_emb, rel_features, rel_features_inv, query_entities, query_node_emb=None):
         batch_size, max_local_entity = local_entity.size()
@@ -73,10 +99,10 @@ class ReasonGNNLayer(BaseGNNLayer):
         fact_query = torch.index_select(instruction, dim=0, index=self.batch_ids)
         if pos_emb is not None:
             pe = pos_emb(self.batch_rels)
-            # fact_rel = torch.cat([fact_rel, pe], 1)
-            fact_val = F.relu((rel_linear(fact_rel)+pe) * fact_query)
+            rel_input = rel_linear(fact_rel) + pe
         else :
-            fact_val = F.relu(rel_linear(fact_rel) * fact_query)
+            rel_input = rel_linear(fact_rel)
+        fact_val = F.relu(self._instruction_fuse(fact_query, rel_input))
         fact_prior = torch.sparse.mm(self.head2fact_mat, curr_dist.view(-1, 1))
 
         fact_val = fact_val * fact_prior
@@ -99,10 +125,10 @@ class ReasonGNNLayer(BaseGNNLayer):
         fact_query = torch.index_select(instruction, dim=0, index=self.batch_ids)
         if pos_emb_inv is not None:
             pe = pos_emb_inv(self.batch_rels)
-            # fact_rel = torch.cat([fact_rel, pe], 1)
-            fact_val = F.relu((rel_linear(fact_rel)+pe) * fact_query)
+            rel_input = rel_linear(fact_rel) + pe
         else :
-            fact_val = F.relu(rel_linear(fact_rel) * fact_query)
+            rel_input = rel_linear(fact_rel)
+        fact_val = F.relu(self._instruction_fuse(fact_query, rel_input))
         fact_prior = torch.sparse.mm(self.tail2fact_mat, curr_dist.view(-1, 1))
         
 
@@ -172,5 +198,4 @@ class ReasonGNNLayer(BaseGNNLayer):
         
         
         return current_dist, self.local_entity_emb 
-
 

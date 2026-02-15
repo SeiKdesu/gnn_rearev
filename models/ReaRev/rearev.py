@@ -168,7 +168,7 @@ class ReaRev(BaseModel):
         # local_entity, query_entities, kb_adj_mat, query_text, seed_dist, answer_dist = batch
         local_entity, query_entities, kb_adj_mat, query_text, seed_dist, true_batch_id, answer_dist = batch
         local_entity = torch.from_numpy(local_entity).type('torch.LongTensor').to(self.device)
-        # local_entity_mask = (local_entity != self.num_entity).float()
+        local_entity_mask = (local_entity != self.num_entity).float()
         query_entities = torch.from_numpy(query_entities).type('torch.FloatTensor').to(self.device)
         answer_dist = torch.from_numpy(answer_dist).type('torch.FloatTensor').to(self.device)
         seed_dist = torch.from_numpy(seed_dist).type('torch.FloatTensor').to(self.device)
@@ -216,7 +216,7 @@ class ReaRev(BaseModel):
             """
             for j in range(self.num_ins):
                 reform = getattr(self, 'reform' + str(j))
-                q = reform(self.instruction.instructions[j].squeeze(1), global_rep, query_entities, local_entity)
+                q = reform(self.instruction.instructions[j].squeeze(1), global_rep, query_entities, local_entity_mask)
                 qs.append(q.unsqueeze(1))
                 self.instruction.instructions[j] = q.unsqueeze(1)
         
