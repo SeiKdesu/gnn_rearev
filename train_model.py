@@ -173,6 +173,28 @@ class Trainer_KBQA(object):
             device=self.device,
         )
         self._refresh_relation_features()
+        # Optional: adjust batch sizes after switching datasets
+        bs_switch = self.args.get("batch_size_switch")
+        if bs_switch is not None:
+            try:
+                bs_switch = int(bs_switch)
+                if bs_switch > 0 and bs_switch != self.args["batch_size"]:
+                    old_bs = self.args["batch_size"]
+                    self.args["batch_size"] = bs_switch
+                    self._log_info(f"[data switch] batch_size changed {old_bs} -> {bs_switch}")
+            except Exception:
+                self._log_info(f"[data switch] invalid batch_size_switch={bs_switch!r}; skipping.")
+        tbs_switch = self.args.get("test_batch_size_switch")
+        if tbs_switch is not None:
+            try:
+                tbs_switch = int(tbs_switch)
+                if tbs_switch > 0 and tbs_switch != self.test_batch_size:
+                    old_tbs = self.test_batch_size
+                    self.test_batch_size = tbs_switch
+                    self.args["test_batch_size"] = tbs_switch
+                    self._log_info(f"[data switch] test_batch_size changed {old_tbs} -> {tbs_switch}")
+            except Exception:
+                self._log_info(f"[data switch] invalid test_batch_size_switch={tbs_switch!r}; skipping.")
         self._data_switched = True
         provided_str = ", ".join([f"{s}={v}" for s, v in provided])
         self._log_info(
