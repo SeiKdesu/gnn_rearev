@@ -90,6 +90,12 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
     parser.add_argument('--fact_scale', default=3 if default is None else default, type=int)
     parser.add_argument('--eval_every', default=2 if default is None else default, type=int)
     parser.add_argument('--batch_size', default=8 if default is None else default, type=int)
+    parser.add_argument(
+        '--batch_size_switch',
+        default=default,
+        type=int,
+        help='Batch size to use after switch_epoch (if set).',
+    )
     parser.add_argument('--gradient_clip', default=1.0 if default is None else default, type=float)
     parser.add_argument('--lr', default=0.0005 if default is None else default, type=float)
     parser.add_argument('--decay_rate', default=0.0 if default is None else default, type=float)
@@ -109,6 +115,12 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
     parser.add_argument('--load_ckpt_file', default=default, type=str)
     parser.add_argument('--eps', default=0.95 if default is None else default, type=float) # threshold for f1
     parser.add_argument('--test_batch_size', default=20 if default is None else default, type=int)
+    parser.add_argument(
+        '--test_batch_size_switch',
+        default=default,
+        type=int,
+        help='Test batch size to use after switch_epoch (if set).',
+    )
     parser.add_argument('--q_type', default='seq' if default is None else default, type=str)
     parser.add_argument(
         '--dump_wrong',
