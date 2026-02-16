@@ -177,12 +177,7 @@ class Trainer_KBQA(object):
                         eval_f1, eval_h1, eval_em
                     )
                 )
-                wandb.log({
-                    "Epoch": epoch + 1,
-                    "Val F1": eval_f1,
-                    "Val H1": eval_h1,
-                    "Val EM": eval_em
-                })
+                
                 # eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 # self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
                 do_test = False
@@ -207,6 +202,12 @@ class Trainer_KBQA(object):
                         eval_f1, eval_h1, eval_em
                     )
                 )
+                wandb.log({
+                    "Epoch": epoch + 1,
+                    "Val F1": eval_f1,
+                    "Val H1": eval_h1,
+                    "Val EM": eval_em
+                })
                 # if do_test:
                 #     eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 #     self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
