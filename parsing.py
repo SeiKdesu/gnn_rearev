@@ -89,7 +89,7 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
     parser.add_argument('--warmup_epoch', default=0 if default is None else default, type=int)
     parser.add_argument('--fact_scale', default=3 if default is None else default, type=int)
     parser.add_argument('--eval_every', default=2 if default is None else default, type=int)
-    parser.add_argument('--batch_size', default=4 if default is None else default, type=int)
+    parser.add_argument('--batch_size', default=8 if default is None else default, type=int)
     parser.add_argument(
         '--batch_size_switch',
         default=default,
