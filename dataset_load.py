@@ -301,6 +301,36 @@ class BasicDataLoader(object):
 
         self._prepare_data()
 
+    def release(self):
+        try:
+            conn = getattr(self, "_merged_db_conn", None)
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+        self._merged_db_conn = None
+
+        for attr in [
+            "data",
+            "kb_adj_mats",
+            "kb_fact_rels",
+            "candidate_entities",
+            "query_entities",
+            "seed_distribution",
+            "answer_dists",
+            "answer_lists",
+            "query_texts",
+            "global2local_entity_maps",
+            "local_entity_counts",
+            "question_id",
+            "batches",
+        ]:
+            if hasattr(self, attr):
+                try:
+                    setattr(self, attr, None)
+                except Exception:
+                    pass
+
     def _load_data_streaming(self) -> None:
         """
         Low-RAM loader: stream JSONL twice and build numpy arrays without keeping full JSON objects.
