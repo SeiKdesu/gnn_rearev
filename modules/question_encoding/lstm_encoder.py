@@ -9,8 +9,9 @@ VERY_NEG_NUMBER = -100000000000
 
 class LSTMInstruction(BaseInstruction):
 
-    def __init__(self, args, word_embedding, num_word):
-        super(LSTMInstruction, self).__init__(args)
+    def __init__(self, args, word_embedding, num_word, constraint=False):
+        super(LSTMInstruction, self).__init__(args, constraint)
+        self.constraint = constraint
         self.word2id = get_dict(args['data_folder'],args['word2id'])
 
         self.word_embedding = word_embedding
@@ -47,4 +48,3 @@ class LSTMInstruction(BaseInstruction):
     
 
     
-
