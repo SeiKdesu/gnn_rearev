@@ -143,7 +143,23 @@ class Trainer_KBQA(object):
         prev_counts = (self.num_entity, self.num_kb_relation, self.num_word)
         old_train, old_valid, old_test = self.train_data, self.valid_data, self.test_data
         self.load_data(self.args, self.args["lm"])
+        for ds in (old_train, old_valid, old_test):
+            if ds is not None and hasattr(ds, "release"):
+                try:
+                    ds.release()
+                except Exception:
+                    pass
         del old_train, old_valid, old_test
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
         new_counts = (self.num_entity, self.num_kb_relation, self.num_word)
         if new_counts[:2] != prev_counts[:2]:
