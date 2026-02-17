@@ -40,6 +40,8 @@ class Trainer_KBQA(object):
         self.reset_time = 0
         self._data_switched = False
         self._data_switch_epoch = args.get("switch_epoch", None)
+        self._data_switch_plan = self._build_data_switch_plan(args)
+        self._data_switch_idx = 0
         self.load_data(args, args["lm"])
 
         if "decay_rate" in args:
@@ -106,100 +108,164 @@ class Trainer_KBQA(object):
         if self.logger is not None:
             self.logger.info(msg)
 
+    def _parse_csv_list(self, value, cast_func=None):
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            items = list(value)
+        else:
+            s = str(value).strip()
+            if not s:
+                return []
+            items = [v.strip() for v in s.split(",") if v.strip()]
+        if cast_func is None:
+            return items
+        out = []
+        for v in items:
+            try:
+                out.append(cast_func(v))
+            except Exception:
+                self._log_info(f"[data switch] failed to parse value={v!r}; skipping.")
+        return out
+
+    def _build_data_switch_plan(self, args):
+        plan = []
+
+        epochs = self._parse_csv_list(args.get("switch_epochs"), int)
+        train_files = self._parse_csv_list(args.get("data_file_train_switches"))
+        dev_files = self._parse_csv_list(args.get("data_file_dev_switches"))
+        test_files = self._parse_csv_list(args.get("data_file_test_switches"))
+        bs_list = self._parse_csv_list(args.get("batch_size_switches"), int)
+        tbs_list = self._parse_csv_list(args.get("test_batch_size_switches"), int)
+
+        if epochs:
+            last_ep = -1
+            for i, ep in enumerate(epochs):
+                if ep < last_ep:
+                    self._log_info("[data switch] switch_epochs not sorted; using given order.")
+                last_ep = ep
+                step = {
+                    "epoch": ep,
+                    "train": train_files[i] if i < len(train_files) else None,
+                    "dev": dev_files[i] if i < len(dev_files) else None,
+                    "test": test_files[i] if i < len(test_files) else None,
+                    "batch_size": bs_list[i] if i < len(bs_list) else None,
+                    "test_batch_size": tbs_list[i] if i < len(tbs_list) else None,
+                }
+                if any(v is not None for k, v in step.items() if k != "epoch"):
+                    plan.append(step)
+            return plan
+
+        # Backward compatibility: single switch_epoch
+        switch_epoch = args.get("switch_epoch", None)
+        if switch_epoch is not None:
+            step = {
+                "epoch": switch_epoch,
+                "train": args.get("data_file_train_switch"),
+                "dev": args.get("data_file_dev_switch"),
+                "test": args.get("data_file_test_switch"),
+                "batch_size": args.get("batch_size_switch"),
+                "test_batch_size": args.get("test_batch_size_switch"),
+            }
+            if any(v is not None for k, v in step.items() if k != "epoch"):
+                plan.append(step)
+        return plan
+
     def _switch_dataset_if_needed(self, epoch: int) -> None:
-        if self._data_switched:
+        if not self._data_switch_plan:
             return
-        switch_epoch = self._data_switch_epoch
-        if switch_epoch is None:
-            return
-        try:
-            switch_epoch = int(switch_epoch)
-        except Exception:
-            self._log_info(f"[data switch] invalid switch_epoch={switch_epoch!r}; skipping.")
-            self._data_switched = True
-            return
-        if switch_epoch < 0:
-            return
-        if epoch < switch_epoch:
-            return
+        while self._data_switch_idx < len(self._data_switch_plan):
+            step = self._data_switch_plan[self._data_switch_idx]
+            switch_epoch = step.get("epoch", None)
+            if switch_epoch is None:
+                self._data_switch_idx += 1
+                continue
+            try:
+                switch_epoch = int(switch_epoch)
+            except Exception:
+                self._log_info(f"[data switch] invalid switch_epoch={switch_epoch!r}; skipping.")
+                self._data_switch_idx += 1
+                continue
+            if switch_epoch < 0:
+                self._data_switch_idx += 1
+                continue
+            if epoch < switch_epoch:
+                return
 
-        switch_keys = {
-            "train": "data_file_train_switch",
-            "dev": "data_file_dev_switch",
-            "test": "data_file_test_switch",
-        }
-        provided = []
-        for split, key in switch_keys.items():
-            val = self.args.get(key)
-            if val is not None:
-                self.args[f"data_file_{split}"] = val
-                provided.append((split, val))
+            provided = []
+            for split in ("train", "dev", "test"):
+                val = step.get(split)
+                if val is not None:
+                    self.args[f"data_file_{split}"] = val
+                    provided.append((split, val))
 
-        if not provided:
-            self._log_info("[data switch] switch_epoch set but no *_switch files provided; skipping.")
-            self._data_switched = True
-            return
+            bs_switch = step.get("batch_size")
+            tbs_switch = step.get("test_batch_size")
+            if not provided and bs_switch is None and tbs_switch is None:
+                self._log_info(f"[data switch] epoch {epoch + 1}: no changes provided; skipping.")
+                self._data_switch_idx += 1
+                continue
 
-        prev_counts = (self.num_entity, self.num_kb_relation, self.num_word)
-        old_train, old_valid, old_test = self.train_data, self.valid_data, self.test_data
-        self.load_data(self.args, self.args["lm"])
-        del old_train, old_valid, old_test
+            prev_counts = (self.num_entity, self.num_kb_relation, self.num_word)
+            old_train, old_valid, old_test = self.train_data, self.valid_data, self.test_data
+            self.load_data(self.args, self.args["lm"])
+            del old_train, old_valid, old_test
 
-        new_counts = (self.num_entity, self.num_kb_relation, self.num_word)
-        if new_counts[:2] != prev_counts[:2]:
-            raise RuntimeError(
-                "Switching datasets changed (num_entity, num_relation). "
-                f"before={prev_counts[:2]}, after={new_counts[:2]}. "
-                "This is not supported without rebuilding the model."
+            new_counts = (self.num_entity, self.num_kb_relation, self.num_word)
+            if new_counts[:2] != prev_counts[:2]:
+                raise RuntimeError(
+                    "Switching datasets changed (num_entity, num_relation). "
+                    f"before={prev_counts[:2]}, after={new_counts[:2]}. "
+                    "This is not supported without rebuilding the model."
+                )
+            lm_name = self.args.get("lm", "lstm")
+            if lm_name == "lstm" and new_counts[2] != prev_counts[2]:
+                raise RuntimeError(
+                    "Switching datasets changed num_word under LSTM. "
+                    f"before={prev_counts[2]}, after={new_counts[2]}. "
+                    "This is not supported without rebuilding the model."
+                )
+            if lm_name != "lstm" and new_counts[2] != prev_counts[2]:
+                self._log_info(
+                    f"[data switch] num_word changed {prev_counts[2]} -> {new_counts[2]} (lm={lm_name}); "
+                    "ignored for non-LSTM."
+                )
+
+            self.evaluator = Evaluator(
+                args=self.args,
+                model=self.model,
+                entity2id=self.entity2id,
+                relation2id=self.relation2id,
+                device=self.device,
             )
-        lm_name = self.args.get("lm", "lstm")
-        if lm_name == "lstm" and new_counts[2] != prev_counts[2]:
-            raise RuntimeError(
-                "Switching datasets changed num_word under LSTM. "
-                f"before={prev_counts[2]}, after={new_counts[2]}. "
-                "This is not supported without rebuilding the model."
-            )
-        if lm_name != "lstm" and new_counts[2] != prev_counts[2]:
+            self._refresh_relation_features()
+
+            if bs_switch is not None:
+                try:
+                    bs_switch = int(bs_switch)
+                    if bs_switch > 0 and bs_switch != self.args["batch_size"]:
+                        old_bs = self.args["batch_size"]
+                        self.args["batch_size"] = bs_switch
+                        self._log_info(f"[data switch] batch_size changed {old_bs} -> {bs_switch}")
+                except Exception:
+                    self._log_info(f"[data switch] invalid batch_size_switch={bs_switch!r}; skipping.")
+            if tbs_switch is not None:
+                try:
+                    tbs_switch = int(tbs_switch)
+                    if tbs_switch > 0 and tbs_switch != self.test_batch_size:
+                        old_tbs = self.test_batch_size
+                        self.test_batch_size = tbs_switch
+                        self.args["test_batch_size"] = tbs_switch
+                        self._log_info(f"[data switch] test_batch_size changed {old_tbs} -> {tbs_switch}")
+                except Exception:
+                    self._log_info(f"[data switch] invalid test_batch_size_switch={tbs_switch!r}; skipping.")
+
+            provided_str = ", ".join([f"{s}={v}" for s, v in provided]) if provided else "no file changes"
             self._log_info(
-                f"[data switch] num_word changed {prev_counts[2]} -> {new_counts[2]} (lm={lm_name}); "
-                "ignored for non-LSTM."
+                f"[data switch] epoch {epoch + 1}: switched data files -> {provided_str}"
             )
 
-        self.evaluator = Evaluator(
-            args=self.args,
-            model=self.model,
-            entity2id=self.entity2id,
-            relation2id=self.relation2id,
-            device=self.device,
-        )
-        self._refresh_relation_features()
-        # Optional: adjust batch sizes after switching datasets
-        bs_switch = self.args.get("batch_size_switch")
-        if bs_switch is not None:
-            try:
-                bs_switch = int(bs_switch)
-                if bs_switch > 0 and bs_switch != self.args["batch_size"]:
-                    old_bs = self.args["batch_size"]
-                    self.args["batch_size"] = bs_switch
-                    self._log_info(f"[data switch] batch_size changed {old_bs} -> {bs_switch}")
-            except Exception:
-                self._log_info(f"[data switch] invalid batch_size_switch={bs_switch!r}; skipping.")
-        tbs_switch = self.args.get("test_batch_size_switch")
-        if tbs_switch is not None:
-            try:
-                tbs_switch = int(tbs_switch)
-                if tbs_switch > 0 and tbs_switch != self.test_batch_size:
-                    old_tbs = self.test_batch_size
-                    self.test_batch_size = tbs_switch
-                    self.args["test_batch_size"] = tbs_switch
-                    self._log_info(f"[data switch] test_batch_size changed {old_tbs} -> {tbs_switch}")
-            except Exception:
-                self._log_info(f"[data switch] invalid test_batch_size_switch={tbs_switch!r}; skipping.")
-        self._data_switched = True
-        provided_str = ", ".join([f"{s}={v}" for s, v in provided])
-        self._log_info(
-            f"[data switch] epoch {epoch + 1}: switched data files -> {provided_str}"
-        )
+            self._data_switch_idx += 1
 
     def optim_def(self):
 

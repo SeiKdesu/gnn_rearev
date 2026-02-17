@@ -40,6 +40,12 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
         help='Epoch index to start using *_switch files (0-based). Example: 20 switches after 20 epochs (starts at epoch 21).',
     )
     parser.add_argument(
+        '--switch_epochs',
+        default=default,
+        type=str,
+        help='Comma-separated epoch indices for multi-stage switches (0-based). Example: "20,40" for 3 stages.',
+    )
+    parser.add_argument(
         '--data_file_train_switch',
         default=default,
         type=str,
@@ -56,6 +62,24 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
         default=default,
         type=str,
         help='Test file to use after switch_epoch (relative to --data_folder unless absolute)',
+    )
+    parser.add_argument(
+        '--data_file_train_switches',
+        default=default,
+        type=str,
+        help='Comma-separated train files for each switch epoch (relative to --data_folder unless absolute)',
+    )
+    parser.add_argument(
+        '--data_file_dev_switches',
+        default=default,
+        type=str,
+        help='Comma-separated dev files for each switch epoch (relative to --data_folder unless absolute)',
+    )
+    parser.add_argument(
+        '--data_file_test_switches',
+        default=default,
+        type=str,
+        help='Comma-separated test files for each switch epoch (relative to --data_folder unless absolute)',
     )
 
     # embeddings
@@ -96,6 +120,12 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
         type=int,
         help='Batch size to use after switch_epoch (if set).',
     )
+    parser.add_argument(
+        '--batch_size_switches',
+        default=default,
+        type=str,
+        help='Comma-separated batch sizes for each switch epoch.',
+    )
     parser.add_argument('--gradient_clip', default=1.0 if default is None else default, type=float)
     parser.add_argument('--lr', default=0.0005 if default is None else default, type=float)
     parser.add_argument('--decay_rate', default=0.0 if default is None else default, type=float)
@@ -120,6 +150,12 @@ def add_shared_args(parser, *, suppress_defaults: bool = False):
         default=default,
         type=int,
         help='Test batch size to use after switch_epoch (if set).',
+    )
+    parser.add_argument(
+        '--test_batch_size_switches',
+        default=default,
+        type=str,
+        help='Comma-separated test batch sizes for each switch epoch.',
     )
     parser.add_argument('--q_type', default='seq' if default is None else default, type=str)
     parser.add_argument(
