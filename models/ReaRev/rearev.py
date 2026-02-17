@@ -141,6 +141,8 @@ class ReaRev(BaseModel):
         self.init_entity_emb = self.local_entity_emb
         self.curr_dist = curr_dist
         self.dist_history = []
+        self.relation_ins_history = []
+        self.gnn_dist_history = []
         self.action_probs = []
         self.seed_entities = curr_dist
         
@@ -205,9 +207,13 @@ class ReaRev(BaseModel):
 
         for t in range(self.num_iter):
             relation_ins = torch.cat(self.instruction.instructions, dim=1)
+            self.relation_ins_history.append(relation_ins.detach())
             self.curr_dist = current_dist            
+            step_dists = []
             for j in range(self.num_gnn):
                 self.curr_dist, global_rep = self.reasoning(self.curr_dist, relation_ins, step=j)
+                step_dists.append(self.curr_dist.detach())
+            self.gnn_dist_history.append(step_dists)
             self.dist_history.append(self.curr_dist)
             qs = []
 

@@ -62,9 +62,6 @@ class Trainer_KBQA(object):
         #         self.args, len(self.entity2id), self.num_kb_relation, self.num_word
         #     )
 
-        if args["relation_word_emb"]:
-            # self.model.use_rel_texts(self.rel_texts, self.rel_texts_inv)
-            self.model.encode_rel_texts(self.rel_texts, self.rel_texts_inv)
         total_params = sum(p.numel() for p in self.model.parameters())
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
@@ -80,6 +77,7 @@ class Trainer_KBQA(object):
             device=self.device,
         )
         self.load_pretrain()
+        self._refresh_relation_features()
         self.optim_def()
 
         self.num_relation = self.num_kb_relation
@@ -132,7 +130,16 @@ class Trainer_KBQA(object):
             print("Load ckpt from", ckpt_path)
             self.load_ckpt(ckpt_path)
 
+    def _refresh_relation_features(self):
+        if not self.args.get("relation_word_emb", False):
+            return
+        was_training = self.model.training
+        self.model.encode_rel_texts(self.rel_texts, self.rel_texts_inv)
+        if was_training:
+            self.model.train()
+
     def evaluate(self, data, test_batch_size=20, write_info=False):
+        self._refresh_relation_features()
         return self.evaluator.evaluate(data, test_batch_size, write_info)
 
     def train(self, start_epoch, end_epoch):
@@ -177,12 +184,7 @@ class Trainer_KBQA(object):
                         eval_f1, eval_h1, eval_em
                     )
                 )
-                wandb.log({
-                    "Epoch": epoch + 1,
-                    "Val F1": eval_f1,
-                    "Val H1": eval_h1,
-                    "Val EM": eval_em
-                })
+               
                 # eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 # self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
                 do_test = False
@@ -207,6 +209,12 @@ class Trainer_KBQA(object):
                         eval_f1, eval_h1, eval_em
                     )
                 )
+                wandb.log({
+                    "Epoch": epoch + 1,
+                    "Val F1": eval_f1,
+                    "Val H1": eval_h1,
+                    "Val EM": eval_em
+                })
                 # if do_test:
                 #     eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 #     self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
@@ -347,9 +355,50 @@ class Trainer_KBQA(object):
         print("Best %s, save model as %s" % (reason, model_name))
 
     def load_ckpt(self, filename):
-        checkpoint = torch.load(filename, map_location=torch.device(self.device))
-        model_state_dict = checkpoint["model_state_dict"]
+        checkpoint = torch.load(filename, map_location="cpu")
+        sd = checkpoint["model_state_dict"]
 
         model = self.model
-        # self.logger.info("Load param of {} from {}.".format(", ".join(list(model_state_dict.keys())), filename))
-        model.load_state_dict(model_state_dict, strict=False)
+        model_sd = model.state_dict()
+
+        # (任意) DDP/DataParallelの "module." が付いてる場合に剥がす
+        if any(k.startswith("module.") for k in sd.keys()):
+            sd = {k.replace("module.", "", 1): v for k, v in sd.items()}
+
+        # 1) モデルに存在するキーだけ残す
+        filtered = {k: v for k, v in sd.items() if k in model_sd}
+
+        # 2) shape不一致も除外（あると strict=True で落ちる）
+        shape_mismatch = []
+        for k in list(filtered.keys()):
+            if filtered[k].shape != model_sd[k].shape:
+                shape_mismatch.append((k, tuple(filtered[k].shape), tuple(model_sd[k].shape)))
+                filtered.pop(k)
+
+        # 3) strict=True を通すために「モデルが要求する全キーが揃ってるか」確認
+        missing = [k for k in model_sd.keys() if k not in filtered]
+        unexpected = [k for k in sd.keys() if k not in model_sd]
+
+        if unexpected:
+            print("[INFO] Dropped unexpected keys (not in current model):", unexpected[:20], "..." if len(unexpected) > 20 else "")
+        if shape_mismatch:
+            print("[WARN] Dropped shape-mismatch keys:", shape_mismatch[:10], "..." if len(shape_mismatch) > 10 else "")
+
+        if missing:
+            # これが出るなら「今のモデルに必要な重みが ckpt に無い」ので完全復元は不可
+            raise RuntimeError(f"Missing keys for strict=True (ckpt lacks these): {missing[:30]}{'...' if len(missing)>30 else ''}")
+
+        model.load_state_dict(filtered, strict=True)
+        with torch.no_grad():
+            max_abs_diff = 0.0
+            max_key = None
+            for k, v in model.state_dict().items():
+                diff = (v.cpu() - filtered[k]).abs().max().item()
+                if diff > max_abs_diff:
+                    max_abs_diff = diff
+                    max_key = k
+        print(f"[VERIFY] max_abs_diff={max_abs_diff:.3e} at {max_key}")
+        assert max_abs_diff == 0.0, "Loaded weights do not exactly match checkpoint!"
+        model.to(self.device)
+        self._refresh_relation_features()
+        print("Loaded checkpoint with strict=True (after filtering).")
